@@ -1,0 +1,39 @@
+{
+  "cash": 4999287.601241887,
+  "last_decision_date": "2026-05-04",
+  "last_decision_log": {
+    "a2_variant": "A2b",
+    "fallback_used": false,
+    "model": "z-ai/glm4.7",
+    "prompt_hash": "b0fbd888c698314f98cedc4fbf5e6d383c4b0445ec2c7a977a1ac059b9232f14",
+    "prompt_tokens": 1107,
+    "provider": "nvidia",
+    "repair_used": false,
+    "response_tokens": 126,
+    "success_sleep_seconds": 0.0
+  },
+  "last_marked_date": "2026-05-04",
+  "nav_close": 103404426.74014391,
+  "pending_execution_date": "2026-05-06",
+  "pending_regime": {
+    "cash_weight": 0.05,
+    "regime_date": "2025-12-12",
+    "regime_key": "DRAI_RISK_ON",
+    "regime_name": "DRAI Risk-On",
+    "stock_weight": 0.95
+  },
+  "pending_stock_weight": 0.95,
+  "pending_weights": {
+    "117680": 0.25,
+    "139260": 0.25,
+    "227550": 0.25,
+    "266390": 0.25
+  },
+  "qty": {
+    "266410": 4007.4449711673346,
+    "266420": 427.09741200132083,
+    "315270": 881.9951198207322,
+    "476800": 5923.080301128273
+  },
+  "strategy": "A2"
+}

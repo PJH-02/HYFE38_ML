@@ -1,0 +1,27 @@
+__pycache__
+.omc
+.omx
+reference/
+rl_factor_rotation/
+co_movement_analysis.py
+REGIME_QMS.csv
+run_backtest.py
+run_training.py
+스크린샷 2026-01-07 130302.png
+docs/
+
+# Local secrets
+testing/zai_llm_config.json
+pilot/.env
+
+# Generated backtest and pilot outputs
+testing/out/
+testing/out_*/
+pilot/out/
+pilot/data/
+
+# Runtime noise
+*.pyc
+*.log
+*.err.log
+*.run.log
