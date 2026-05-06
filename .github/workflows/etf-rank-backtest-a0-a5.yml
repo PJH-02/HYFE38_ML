@@ -2,9 +2,19 @@ name: ETF Rank Backtest A0-A5
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/etf-rank-backtest-a0-a5.yml"
+      - "testing/determine_next_backtest_chunk.py"
+      - "testing/run_monthly_strategy_backtest.py"
+      - "testing/build_final_backtest_report.py"
+      - "testing/backtest_state/chunk_state.json"
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: etf-rank-backtest-a0-a5-state
@@ -196,7 +206,7 @@ jobs:
   commit-backtest-state:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [prepare-ranks, llm-backtest-chunk]
+    needs: [prepare-ranks, fast-backtests, llm-backtest-chunk]
     if: needs.prepare-ranks.outputs.should_run == '1'
     steps:
       - name: Checkout
@@ -216,7 +226,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rebuilt-ranks-${{ github.run_id }}
-          path: testing
+          path: testing/_rebuilt_ranks
+
+      - name: Download A0/A1/A5 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-fast-backtests-${{ github.run_id }}
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10
 
       - name: Download A2b state
         uses: actions/download-artifact@v4
@@ -268,23 +284,36 @@ jobs:
         if: needs.prepare-ranks.outputs.end_month == needs.prepare-ranks.outputs.last_month
         working-directory: testing
         run: |
-          python -u A0_equal_weight.py --out-root "$OUT_ROOT"
-          python -u A1_rule_based_rank_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
-          python -u A5_bayesian_winner_loser_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
           python -u build_final_backtest_report.py \
             --out-root "$OUT_ROOT" \
-            --rank-panel rank_panel.csv \
+            --rank-panel _rebuilt_ranks/rank_panel.csv \
             --report-dir backtest_state/final_report
 
       - name: Commit backtest state
+        id: commit_state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add testing/backtest_state
           if git diff --cached --quiet; then
             echo "No backtest state changes to commit."
+            echo "committed=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git commit -m "ci: save llm backtest state through ${{ needs.prepare-ranks.outputs.end_month }}"
           git pull --rebase --autostash origin "${{ github.ref_name }}"
           git push origin "HEAD:${{ github.ref_name }}"
+          echo "committed=1" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger next six-month chunk
+        if: steps.commit_state.outputs.committed == '1' && needs.prepare-ranks.outputs.end_month != needs.prepare-ranks.outputs.last_month
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/etf-rank-backtest-a0-a5.yml/dispatches" \
+            -d "{\"ref\":\"${REF_NAME}\"}"
