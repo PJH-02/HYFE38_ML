@@ -286,5 +286,5 @@ jobs:
             exit 0
           fi
           git commit -m "ci: save llm backtest state through ${{ needs.prepare-ranks.outputs.end_month }}"
-          git pull --rebase origin "${{ github.ref_name }}"
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
           git push origin "HEAD:${{ github.ref_name }}"
