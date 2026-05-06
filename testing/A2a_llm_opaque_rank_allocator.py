@@ -668,12 +668,16 @@ def run_llm_backtest(
     top_k: int,
     out_dir: str | Path,
     generator,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> None:
     validate_top_k(top_k)
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     id_mapping = create_id_mapping(panel)
     dates = sorted(panel["date"].dropna().unique())
+    start_ts = pd.Timestamp(start_date) if start_date else None
+    end_ts = pd.Timestamp(end_date) if end_date else None
     regime_path = default_regime_path()
     regime = load_regime_table(regime_path)
     daily_path = out_path / "daily_results.csv"
@@ -689,6 +693,7 @@ def run_llm_backtest(
     fallback_count = 0
     completed_dates: set[str] = set()
     fail_on_fallback = _env_flag("LLM_FAIL_ON_FALLBACK", False)
+    progress_interval = max(1, int(os.getenv("LLM_PROGRESS_INTERVAL", "25")))
 
     if checkpoint_path.exists() and daily_path.exists() and weights_path.exists() and log_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -729,6 +734,11 @@ def run_llm_backtest(
         )
 
     for step, decision_date in enumerate(dates[:-1]):
+        decision_ts = pd.Timestamp(decision_date)
+        if start_ts is not None and decision_ts < start_ts:
+            continue
+        if end_ts is not None and decision_ts > end_ts:
+            continue
         decision_date_text = pd.Timestamp(decision_date).date().isoformat()
         if decision_date_text in completed_dates:
             continue
@@ -805,8 +815,16 @@ def run_llm_backtest(
         )
         completed_dates.add(decision_date_text)
         persist_checkpoint()
+        if len(daily_rows) % progress_interval == 0:
+            print(
+                f"PROGRESS {strategy} top_k={top_k} decisions={len(daily_rows)} "
+                f"latest_decision={decision_date_text} fallback_count={fallback_count}",
+                flush=True,
+            )
     daily_df = pd.DataFrame(daily_rows)
-    persist_checkpoint(complete=True)
+    last_decision_ts = pd.Timestamp(dates[-2]) if len(dates) >= 2 else None
+    is_complete = end_ts is None or (last_decision_ts is not None and end_ts >= last_decision_ts)
+    persist_checkpoint(complete=is_complete)
     llm_config = load_llm_config()
     summary = {
         "strategy": strategy,
@@ -846,9 +864,19 @@ def main() -> None:
     parser.add_argument("--rank-panel", default="rank_panel.csv")
     parser.add_argument("--top-k", type=int, required=True)
     parser.add_argument("--out-root", default="out")
+    parser.add_argument("--start-date", default=None, help="Optional inclusive decision-date start.")
+    parser.add_argument("--end-date", default=None, help="Optional inclusive decision-date end.")
     args = parser.parse_args()
     panel = load_rank_panel(args.rank_panel)
-    run_llm_backtest(panel, "A2a_LLM_OPAQUE", args.top_k, Path(args.out_root) / f"A2a_k{args.top_k}", generate_A2a_weight)
+    run_llm_backtest(
+        panel,
+        "A2a_LLM_OPAQUE",
+        args.top_k,
+        Path(args.out_root) / f"A2a_k{args.top_k}",
+        generate_A2a_weight,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
 
 
 if __name__ == "__main__":

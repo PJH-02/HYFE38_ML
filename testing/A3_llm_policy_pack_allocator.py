@@ -158,9 +158,19 @@ def main() -> None:
     parser.add_argument("--rank-panel", default="rank_panel.csv")
     parser.add_argument("--top-k", type=int, required=True)
     parser.add_argument("--out-root", default="out")
+    parser.add_argument("--start-date", default=None, help="Optional inclusive decision-date start.")
+    parser.add_argument("--end-date", default=None, help="Optional inclusive decision-date end.")
     args = parser.parse_args()
     panel = load_rank_panel(args.rank_panel)
-    run_llm_backtest(panel, "A3_LLM_POLICY", args.top_k, Path(args.out_root) / f"A3_k{args.top_k}", generate_A3_weight)
+    run_llm_backtest(
+        panel,
+        "A3_LLM_POLICY",
+        args.top_k,
+        Path(args.out_root) / f"A3_k{args.top_k}",
+        generate_A3_weight,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
 
 
 if __name__ == "__main__":

@@ -3,10 +3,96 @@ name: ETF Rank Backtest A0-A5
 on:
   workflow_dispatch:
 
+env:
+  REGIME_CSV_PATH: regime_weights.csv
+  OUT_ROOT: out_actions_flow_v2_a0_a5_k10
+  TOP_K_VALUES: "10"
+
 jobs:
-  backtest:
+  prepare-ranks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy
+
+      - name: Rebuild rank panel
+        working-directory: testing
+        run: |
+          python -u 01_make_market_corr_rank.py
+          python -u 02_make_flow_price_rank.py
+          python -u 03_make_rotation_rank.py
+          python -u 04_merge_rank_panel.py
+
+      - name: Upload rebuilt ranks
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: |
+            testing/market_rank.csv
+            testing/flow_rank.csv
+            testing/flow_rank_metadata.json
+            testing/flow_rank_no_selected_actor_report.csv
+            testing/rotation_rank.csv
+            testing/rank_panel.csv
+            testing/regime_weights.csv
+          if-no-files-found: error
+          retention-days: 14
+
+  fast-backtests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: prepare-ranks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy
+
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
+
+      - name: Run A0/A1/A5 backtests
+        working-directory: testing
+        run: |
+          python -u A0_equal_weight.py --out-root "$OUT_ROOT"
+          python -u A1_rule_based_rank_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
+          python -u A5_bayesian_winner_loser_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
+
+      - name: Upload fast backtest outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-rank-fast-backtests-${{ github.run_id }}
+          path: testing/out_actions_flow_v2_a0_a5_k10/
+          if-no-files-found: warn
+          retention-days: 14
+
+  llm-backtests:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    needs: prepare-ranks
+    strategy:
+      fail-fast: false
+      matrix:
+        llm_strategy: [A2a, A2b, A3, A4]
     env:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -23,15 +109,7 @@ jobs:
       LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
       LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
       LLM_FAIL_ON_FALLBACK: "1"
-      REGIME_CSV_PATH: regime_weights.csv
-      OUT_ROOT: out_actions_flow_v2_a0_a5_k10
-      TOP_K_VALUES: "10"
-      REBUILD_RANKS: "1"
-      RUN_A0_A1_A5: "1"
-      RUN_LLM: "1"
-      RUN_LLM_PARALLEL: "1"
-      RUN_A6: "0"
-
+      LLM_PROGRESS_INTERVAL: "10"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,23 +129,26 @@ jobs:
             exit 1
           fi
 
-      - name: Run full-period A0-A5 backtest from rebuilt ranks
-        working-directory: testing
-        run: python -u run_full_backtest.py
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
 
-      - name: Upload backtest outputs
+      - name: Run monthly LLM backtest
+        working-directory: testing
+        run: |
+          python -u run_monthly_strategy_backtest.py \
+            --strategy "${{ matrix.llm_strategy }}" \
+            --rank-panel rank_panel.csv \
+            --out-root "$OUT_ROOT" \
+            --top-k "$TOP_K_VALUES"
+
+      - name: Upload LLM backtest outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: etf-rank-backtest-a0-a5-flow-v2-k10-${{ github.run_id }}
-          path: |
-            testing/out_actions_flow_v2_a0_a5_k10/
-            testing/market_corr_rank.csv
-            testing/flow_rank.csv
-            testing/flow_rank_metadata.json
-            testing/flow_rank_no_selected_actor_report.csv
-            testing/rotation_rank.csv
-            testing/rank_panel.csv
-            testing/regime_weights.csv
+          name: etf-rank-llm-${{ matrix.llm_strategy }}-${{ github.run_id }}
+          path: testing/out_actions_flow_v2_a0_a5_k10/
           if-no-files-found: warn
           retention-days: 14
