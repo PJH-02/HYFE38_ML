@@ -58,8 +58,8 @@ def build_semantic_prompt(packet: dict[str, Any], top_k: int = 10) -> str:
     prompt = {
         "instructions": [
             "Use only the provided ranks and scores.",
-            "market_rank: rank 1 means the ETF has the lowest recent rolling correlation to the broad market index among the valid universe. It is a diversification / market co-movement signal, not a forecast of standalone return.",
-            "market_score: 0 to 1 cross-sectional normalization of market_rank; higher means lower market co-movement.",
+            "market_rank: regime-adjusted broad-market co-movement rank. In risk-on regimes rank 1 favors higher recent rolling correlation to the broad market; in risk-off or neutral regimes rank 1 favors lower recent rolling correlation. It is a market co-movement signal, not a standalone return forecast.",
+            "market_score: 0 to 1 cross-sectional normalization of the regime-adjusted market_rank; higher is better under the active regime rule.",
             "flow_rank: rank 1 means the ETF has the strongest investor-flow signal after selecting only flow actors whose past predictive correlation exceeded the threshold for that ETF. Actor z-scores are direction-adjusted by the historical correlation sign and then equal-weighted.",
             "flow_score: 0 to 1 cross-sectional normalization of flow_rank; higher means more favorable historically predictive flow pressure.",
             "rotation_rank: rank 1 means the ETF has the strongest latest close-to-close cross-sectional price rotation among the valid universe.",

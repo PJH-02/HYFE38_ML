@@ -23,13 +23,26 @@ DEFAULT_REGIME_FILENAME = "ml8_risk_regime_weights_2024_2025_weekly.csv"
 if str(TESTING_DIR) not in sys.path:
     sys.path.insert(0, str(TESTING_DIR))
 
-from A0_equal_weight import COMMISSION_RATE, get_valid_universe, generate_equal_weight  # noqa: E402
+from A0_equal_weight import (  # noqa: E402
+    COMMISSION_RATE,
+    apply_regime_market_score,
+    apply_regime_market_score_by_next_execution,
+    build_trade_rows,
+    generate_equal_weight,
+    get_valid_universe,
+)
 from A1_rule_based_rank_allocator import generate_rule_based_weight  # noqa: E402
 from A2a_llm_opaque_rank_allocator import create_id_mapping, generate_A2a_weight  # noqa: E402
 from A2b_llm_semantic_rank_allocator import generate_A2b_weight  # noqa: E402
 from A3_llm_policy_pack_allocator import generate_A3_weight  # noqa: E402
 from A4_rule_based_llm_blend import generate_A4_weight  # noqa: E402
-from A5_bayesian_winner_loser_allocator import generate_A5_weight, get_bayesian_history, prepare_A5_panel  # noqa: E402
+from A5_bayesian_winner_loser_allocator import (  # noqa: E402
+    bucketize_scores,
+    generate_A5_weight,
+    get_bayesian_history,
+    make_state_key,
+    prepare_A5_panel,
+)
 
 
 PILOT_STRATEGIES = ("A0", "A1", "A2", "A3", "A4", "A5")
@@ -235,7 +248,9 @@ def strategy_weights(
     state: dict[str, Any],
     top_k: int,
     decision_step: int,
+    regime_info: dict[str, Any] | None = None,
 ) -> tuple[dict[str, float], dict[str, Any]]:
+    day_df = apply_regime_market_score(day_df, regime_info)
     valid = get_valid_universe(day_df)
     if valid.empty:
         return {}, {"fallback_used": True, "fallback_reason": "empty_valid_universe"}
@@ -263,7 +278,7 @@ def strategy_weights(
         return normalize_weights(decision.weights), {"fallback_used": decision.fallback_used, **decision.log}
     if strategy == "A5":
         decision_date = day_df["date"].iloc[0]
-        day_a5 = prepared_a5_panel.loc[prepared_a5_panel["date"] == decision_date]
+        day_a5 = make_state_key(bucketize_scores(day_df))
         history = get_bayesian_history(prepared_a5_panel, decision_date)
         weights, fallback = generate_A5_weight(day_a5, history, top_k)
         return normalize_weights(weights), {"fallback_used": bool(fallback), "history_rows": int(len(history))}
@@ -308,6 +323,18 @@ def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     new = pd.concat([old, pd.DataFrame(rows)], ignore_index=True)
     if "date" in new.columns:
         new = new.drop_duplicates(["date"], keep="last")
+    new.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def append_trade_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    new = pd.concat([old, pd.DataFrame(rows)], ignore_index=True)
+    keys = [col for col in ["execution_date", "ticker"] if col in new.columns]
+    if len(keys) == 2:
+        new = new.drop_duplicates(keys, keep="last")
     new.to_csv(path, index=False, encoding="utf-8-sig")
 
 
@@ -500,6 +527,7 @@ def run_strategy(
     state_path = strategy_dir / "state.json"
     state = load_state(state_path, strategy, initial_nav)
     daily_path = strategy_dir / "daily_pnl.csv"
+    trade_path = strategy_dir / "trade_history.csv"
     marked = set(load_daily(daily_path).get("date", pd.Series(dtype=str)).astype(str))
 
     dates = [pd.Timestamp(d) for d in sorted(panel["date"].drop_duplicates())]
@@ -513,9 +541,19 @@ def run_strategy(
             raise ValueError("Need at least one decision date before pilot start date for initial weights.")
         initial_decision = prior_dates[-1]
         day_df = panel.loc[panel["date"] == initial_decision]
-        weights, log = strategy_weights(strategy, day_df, panel, prepared_a5_panel, state, top_k, 0)
         initial_regime = regime_for_date(regime, start_ts.date().isoformat())
+        weights, log = strategy_weights(
+            strategy,
+            day_df,
+            panel,
+            prepared_a5_panel,
+            state,
+            top_k,
+            0,
+            initial_regime,
+        )
         state["pending_execution_date"] = start_ts.date().isoformat()
+        state["pending_decision_date"] = initial_decision.date().isoformat()
         state["pending_weights"] = weights
         state["pending_stock_weight"] = float(initial_regime["stock_weight"])
         state["pending_regime"] = initial_regime
@@ -523,6 +561,7 @@ def run_strategy(
         mark_dates = [d for d in dates if start_ts <= d <= as_of_ts]
 
     daily_rows = []
+    trade_rows: list[dict[str, Any]] = []
     for d in mark_dates:
         date_text = d.date().isoformat()
         if date_text in marked:
@@ -533,15 +572,64 @@ def run_strategy(
         if state.get("pending_execution_date") == date_text:
             target = {str(k): float(v) for k, v in state.get("pending_weights", {}).items()}
             stock_weight = float(state.get("pending_stock_weight", STOCK_RATIO))
+        old_qty = {str(k): float(v) for k, v in state.get("qty", {}).items()}
+        pending_decision_date = str(state.get("pending_decision_date") or date_text)
         state, result = rebalance_or_hold_one_day(state, day_df, target, stock_weight)
         daily_rows.append(result)
+        if target is not None:
+            trade_rows.extend(
+                build_trade_rows(
+                    strategy=strategy,
+                    decision_date=pending_decision_date,
+                    execution_date=date_text,
+                    decision_df=day_df,
+                    execution_df=day_df,
+                    old_qty=old_qty,
+                    new_qty={str(k): float(v) for k, v in state.get("qty", {}).items()},
+                    target_sleeve_weights=target,
+                    result=result,
+                    stock_ratio=float(stock_weight if stock_weight is not None else STOCK_RATIO),
+                )
+            )
+        if d < as_of_ts:
+            next_dates = [candidate for candidate in dates if candidate > d]
+            if next_dates:
+                next_execution_date = next_dates[0].date().isoformat()
+                next_regime = regime_for_date(regime, next_execution_date)
+                next_weights, next_log = strategy_weights(
+                    strategy,
+                    day_df,
+                    panel,
+                    prepared_a5_panel,
+                    state,
+                    top_k,
+                    len(marked) + len(daily_rows),
+                    next_regime,
+                )
+                state["pending_execution_date"] = next_execution_date
+                state["pending_decision_date"] = date_text
+                state["pending_weights"] = next_weights
+                state["pending_stock_weight"] = float(next_regime["stock_weight"])
+                state["pending_regime"] = next_regime
+                state["last_decision_date"] = date_text
+                state["last_decision_log"] = next_log
 
     decision_df = panel.loc[panel["date"] == as_of_ts]
     if decision_df.empty:
         raise ValueError(f"No panel rows for as_of_date={as_of_date}")
-    weights, decision_log = strategy_weights(strategy, decision_df, panel, prepared_a5_panel, state, top_k, len(marked) + len(daily_rows))
     next_regime = regime_for_date(regime, next_open_date)
+    weights, decision_log = strategy_weights(
+        strategy,
+        decision_df,
+        panel,
+        prepared_a5_panel,
+        state,
+        top_k,
+        len(marked) + len(daily_rows),
+        next_regime,
+    )
     state["pending_execution_date"] = next_open_date
+    state["pending_decision_date"] = as_of_date
     state["pending_weights"] = weights
     state["pending_stock_weight"] = float(next_regime["stock_weight"])
     state["pending_regime"] = next_regime
@@ -549,12 +637,15 @@ def run_strategy(
     state["last_decision_log"] = decision_log
     save_state(state_path, state)
     append_csv(daily_path, daily_rows)
+    append_trade_csv(trade_path, trade_rows)
     daily_all = load_daily(daily_path)
 
     orders = make_order_rows(strategy, state, decision_df, weights, next_open_date, next_regime)
     orders_df = pd.DataFrame(orders)
     strategy_dir.mkdir(parents=True, exist_ok=True)
     orders_df.to_csv(strategy_dir / "next_orders.csv", index=False, encoding="utf-8-sig")
+    if trade_path.exists():
+        pd.read_csv(trade_path).to_csv(strategy_dir / "trade_history.csv", index=False, encoding="utf-8-sig")
     orders_df.to_csv(strategy_dir / "target_weights.csv", index=False, encoding="utf-8-sig")
     return {
         "strategy": strategy,
@@ -596,10 +687,11 @@ def run_all_from_args(args: argparse.Namespace, only_strategy: str | None = None
     regime = load_regime_table(regime_path)
     panel_path = build_rank_panel(price_path, flow_path)
     panel = load_panel(panel_path)
-    prepared_a5_panel = prepare_A5_panel(panel)
+    prepared_a5_panel = prepare_A5_panel(apply_regime_market_score_by_next_execution(panel, regime))
     strategies = [only_strategy] if only_strategy else parse_strategy_list(args.strategies)
     summaries = []
     all_orders = []
+    all_trades = []
     for strategy in strategies:
         summary = run_strategy(
             strategy=strategy,
@@ -617,12 +709,17 @@ def run_all_from_args(args: argparse.Namespace, only_strategy: str | None = None
         orders_path = args.out_dir / strategy / "next_orders.csv"
         if orders_path.exists():
             all_orders.append(pd.read_csv(orders_path))
+        trades_path = args.out_dir / strategy / "trade_history.csv"
+        if trades_path.exists():
+            all_trades.append(pd.read_csv(trades_path))
     args.out_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(summaries).to_csv(args.out_dir / "latest_summary.csv", index=False, encoding="utf-8-sig")
     if all_orders:
         combined = pd.concat(all_orders, ignore_index=True)
         combined.to_csv(args.out_dir / "latest_orders.csv", index=False, encoding="utf-8-sig")
         combined.to_csv(args.out_dir / "latest_target_weights.csv", index=False, encoding="utf-8-sig")
+    if all_trades:
+        pd.concat(all_trades, ignore_index=True).to_csv(args.out_dir / "latest_trade_history.csv", index=False, encoding="utf-8-sig")
     print(json.dumps(summaries, ensure_ascii=False, indent=2))
 
 

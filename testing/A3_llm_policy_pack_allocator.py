@@ -47,7 +47,7 @@ def load_policy_pack() -> dict[str, Any]:
             "Weak ranks across all signals should receive zero or minimal weight.",
         ],
         "signal_definitions": {
-            "market_rank": "rank 1 is the lowest recent rolling broad-market correlation; it is a diversification/co-movement signal.",
+            "market_rank": "regime-adjusted broad-market co-movement rank: risk-on favors higher recent rolling broad-market correlation; risk-off and neutral favor lower recent rolling broad-market correlation.",
             "flow_rank": "rank 1 is the strongest selected-actor investor-flow signal; selected actor z-scores are sign-adjusted by historical predictive correlation and equal-weighted.",
             "rotation_rank": "rank 1 is the strongest latest close-to-close cross-sectional price rotation.",
         },

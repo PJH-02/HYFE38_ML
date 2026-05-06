@@ -7,7 +7,7 @@ import math
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -69,6 +69,63 @@ def regime_stock_ratio_for_date(regime: pd.DataFrame | None, date: pd.Timestamp,
     if eligible.empty:
         return float(default)
     return float(eligible.iloc[-1]["stock_weight"])
+
+
+def regime_info_for_date(regime: pd.DataFrame | None, date: pd.Timestamp) -> dict[str, Any] | None:
+    if regime is None:
+        return None
+    eligible = regime.loc[regime["date"] <= pd.Timestamp(date)]
+    if eligible.empty:
+        return None
+    row = eligible.iloc[-1]
+    return {
+        "regime_date": pd.Timestamp(row["date"]).date().isoformat(),
+        "regime_key": str(row.get("regime_key", "")),
+        "regime_name": str(row.get("regime_name", "")),
+        "cash_weight": float(row.get("cash_weight", 1.0 - row["stock_weight"])),
+        "stock_weight": float(row["stock_weight"]),
+    }
+
+
+def is_risk_on_regime(regime_info: Mapping[str, Any] | None) -> bool:
+    if not regime_info:
+        return False
+    text = f"{regime_info.get('regime_key', '')} {regime_info.get('regime_name', '')}".lower()
+    normalized = text.replace("-", "_").replace(" ", "_")
+    return "risk_on" in normalized and "risk_off" not in normalized
+
+
+def apply_regime_market_score(day_df: pd.DataFrame, regime_info: Mapping[str, Any] | None = None) -> pd.DataFrame:
+    adjusted = day_df.copy()
+    if "market_score_regime_adjusted" in adjusted.columns and adjusted["market_score_regime_adjusted"].fillna(False).astype(bool).all():
+        return adjusted
+    if "market_score_original" not in adjusted.columns:
+        adjusted["market_score_original"] = adjusted["market_score"]
+    if "market_rank_original" not in adjusted.columns and "market_rank" in adjusted.columns:
+        adjusted["market_rank_original"] = adjusted["market_rank"]
+
+    risk_on = is_risk_on_regime(regime_info)
+    score = pd.to_numeric(adjusted["market_score_original"], errors="coerce")
+    adjusted["market_score"] = (1.0 - score) if risk_on else score
+    valid_mask = adjusted["market_score"].notna()
+    adjusted.loc[valid_mask, "market_rank"] = adjusted.loc[valid_mask, "market_score"].rank(
+        method="first", ascending=False
+    )
+    adjusted["market_score_regime_adjusted"] = True
+    adjusted["market_score_regime_rule"] = "risk_on_invert_low_corr_score" if risk_on else "risk_off_neutral_keep_low_corr_score"
+    if regime_info:
+        adjusted["market_score_regime_key"] = str(regime_info.get("regime_key", ""))
+    return adjusted
+
+
+def apply_regime_market_score_by_next_execution(panel: pd.DataFrame, regime: pd.DataFrame | None) -> pd.DataFrame:
+    dates = list(pd.Series(panel["date"].drop_duplicates()).sort_values())
+    pieces = []
+    for idx, decision_date in enumerate(dates):
+        execution_date = dates[idx + 1] if idx + 1 < len(dates) else decision_date
+        regime_info = regime_info_for_date(regime, pd.Timestamp(execution_date))
+        pieces.append(apply_regime_market_score(panel.loc[panel["date"] == decision_date], regime_info))
+    return pd.concat(pieces, ignore_index=True) if pieces else panel.copy()
 
 
 def file_sha256(path: Path) -> str | None:
@@ -193,6 +250,105 @@ def floor_target_values(target_budget: pd.Series, prices: pd.Series) -> tuple[pd
     return qty, values
 
 
+def _float_series(values: pd.Series | Mapping[str, float] | None) -> pd.Series:
+    if values is None:
+        return pd.Series(dtype=float)
+    if isinstance(values, pd.Series):
+        out = values.copy()
+    else:
+        out = pd.Series(dict(values), dtype=float)
+    out.index = out.index.astype(str)
+    return out.astype(float)
+
+
+def build_trade_rows(
+    strategy: str,
+    decision_date: str,
+    execution_date: str,
+    decision_df: pd.DataFrame,
+    execution_df: pd.DataFrame,
+    old_qty: pd.Series | Mapping[str, float],
+    new_qty: pd.Series | Mapping[str, float],
+    target_sleeve_weights: pd.Series | Mapping[str, float],
+    result: Mapping[str, float],
+    stock_ratio: float,
+) -> list[dict[str, Any]]:
+    old_qty_s = _float_series(old_qty)
+    new_qty_s = _float_series(new_qty)
+    target_s = _float_series(target_sleeve_weights)
+    prices = execution_df.copy()
+    if "ticker" in prices.columns:
+        prices["ticker"] = prices["ticker"].astype(str)
+        prices = prices.set_index("ticker", drop=False)
+    else:
+        prices.index = prices.index.astype(str)
+    meta = decision_df.copy()
+    meta["ticker"] = meta["ticker"].astype(str)
+    meta = meta.drop_duplicates("ticker").set_index("ticker", drop=False)
+
+    tickers = sorted(set(old_qty_s.index) | set(new_qty_s.index) | set(target_s.index))
+    nav_open_pre = float(result.get("nav_open_pre", 0.0))
+    nav_open_post = float(result.get("nav_open_post", 0.0))
+    nav_close = float(result.get("nav_close", 0.0))
+    day_commission = float(result.get("commission", 0.0))
+    day_turnover = float(result.get("turnover_value", 0.0))
+    daily_return = float(result.get("daily_return", 0.0))
+    rows: list[dict[str, Any]] = []
+    for ticker in tickers:
+        if ticker not in prices.index:
+            continue
+        open_price = float(prices.at[ticker, "open"])
+        close_price = float(prices.at[ticker, "close"])
+        prev_qty = float(old_qty_s.get(ticker, 0.0))
+        target_qty = float(new_qty_s.get(ticker, 0.0))
+        prev_value_open = prev_qty * open_price
+        target_value_open = target_qty * open_price
+        delta_value_open = target_value_open - prev_value_open
+        trade_turnover = abs(delta_value_open)
+        sleeve_weight = float(target_s.get(ticker, 0.0))
+        target_portfolio_weight = stock_ratio * sleeve_weight
+        commission_allocated = day_commission * trade_turnover / day_turnover if day_turnover > 0 else 0.0
+        etf_id = str(meta.at[ticker, "ETF_id"]) if ticker in meta.index and "ETF_id" in meta.columns else ticker
+        name = str(meta.at[ticker, "name"]) if ticker in meta.index and "name" in meta.columns else ticker
+        delta_qty = target_qty - prev_qty
+        rows.append(
+            {
+                "strategy": strategy,
+                "decision_date": decision_date,
+                "execution_date": execution_date,
+                "ticker": ticker,
+                "ETF_id": etf_id,
+                "name": name,
+                "open": open_price,
+                "close": close_price,
+                "prev_qty": prev_qty,
+                "target_qty": target_qty,
+                "delta_qty": delta_qty,
+                "side": "BUY" if delta_qty > 0 else ("SELL" if delta_qty < 0 else "HOLD"),
+                "prev_value_open": prev_value_open,
+                "target_value_open": target_value_open,
+                "delta_value_open": delta_value_open,
+                "trade_turnover_value": trade_turnover,
+                "day_turnover_value": day_turnover,
+                "commission_allocated": commission_allocated,
+                "day_commission": day_commission,
+                "nav_open_pre": nav_open_pre,
+                "nav_open_post": nav_open_post,
+                "nav_close": nav_close,
+                "daily_return": daily_return,
+                "stock_ratio": stock_ratio,
+                "cash_weight": 1.0 - stock_ratio,
+                "target_sleeve_weight": sleeve_weight,
+                "target_portfolio_weight": target_portfolio_weight,
+                "prev_portfolio_weight_open": prev_value_open / nav_open_pre if nav_open_pre > 0 else 0.0,
+                "actual_portfolio_weight_open": target_value_open / nav_open_post if nav_open_post > 0 else 0.0,
+                "cash_after_rebalance": nav_open_post - float((new_qty_s.reindex(prices.index).fillna(0.0) * prices["open"].astype(float)).sum()),
+                "rebalanced": day_turnover > 0,
+            }
+        )
+    return rows
+
+
 def rebalance_and_mark_to_market_next_day(
     state: dict,
     target_sleeve_weights: pd.Series,
@@ -293,19 +449,36 @@ def run_backtest(
     state = {"cash": config.initial_nav, "qty": pd.Series(dtype=float), "nav_close": config.initial_nav}
     daily_rows: list[dict] = []
     weight_rows: list[dict] = []
+    trade_rows: list[dict] = []
     log_rows: list[dict] = []
 
     for idx, decision_date in enumerate(dates[:-1]):
-        day_df = panel.loc[panel["date"] == decision_date].copy()
+        execution_date = dates[idx + 1]
+        regime_info = regime_info_for_date(regime, execution_date)
+        day_df = apply_regime_market_score(panel.loc[panel["date"] == decision_date], regime_info)
         if get_valid_universe(day_df).empty:
             continue
         price_t1 = _next_day_prices(panel, dates, idx)
         target_weights, fallback_used = weight_generator(day_df)
         target_weights = target_weights[target_weights > 0]
-        execution_date = dates[idx + 1]
         execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, config.stock_ratio)
         execution_config = replace(config, stock_ratio=execution_stock_ratio)
+        old_qty = state["qty"].copy()
         state, result = rebalance_and_mark_to_market_next_day(state, target_weights, price_t1, execution_config)
+        trade_rows.extend(
+            build_trade_rows(
+                strategy=config.strategy,
+                decision_date=decision_date.date().isoformat(),
+                execution_date=execution_date.date().isoformat(),
+                decision_df=day_df,
+                execution_df=price_t1,
+                old_qty=old_qty,
+                new_qty=state["qty"],
+                target_sleeve_weights=target_weights,
+                result=result,
+                stock_ratio=execution_stock_ratio,
+            )
+        )
 
         row = {
             "decision_date": decision_date.date().isoformat(),
@@ -341,6 +514,7 @@ def run_backtest(
 
     daily = pd.DataFrame(daily_rows)
     weights = pd.DataFrame(weight_rows)
+    trades = pd.DataFrame(trade_rows)
     summary = compute_performance_metrics(daily, config.initial_nav)
     summary.update(
         {
@@ -358,6 +532,7 @@ def run_backtest(
 
     daily.to_csv(out_dir / "daily_results.csv", index=False)
     weights.to_csv(out_dir / "weights.csv", index=False)
+    trades.to_csv(out_dir / "trade_history.csv", index=False)
     with (out_dir / "summary.json").open("w", encoding="utf-8") as f:
         json.dump(_json_ready(summary), f, indent=2, sort_keys=True)
     with (out_dir / "decision_log.jsonl").open("w", encoding="utf-8") as f:

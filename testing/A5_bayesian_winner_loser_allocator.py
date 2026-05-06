@@ -9,9 +9,12 @@ import pandas as pd
 from A0_equal_weight import (
     BacktestConfig,
     TOP_K_GRID,
+    apply_regime_market_score_by_next_execution,
     default_out_root,
     default_panel_path,
+    default_regime_path,
     get_valid_universe,
+    load_regime_table,
     load_rank_panel,
     normalize_sleeve_weights,
     run_backtest,
@@ -170,7 +173,8 @@ def run_A5_backtest(
     out_root = out_root or default_out_root()
     raw_panel = load_rank_panel(panel_path)
     validate_backtest_panel(raw_panel, require_index_close=True)
-    panel = prepare_A5_panel(raw_panel)
+    regime = load_regime_table(default_regime_path())
+    panel = prepare_A5_panel(apply_regime_market_score_by_next_execution(raw_panel, regime))
     results = {}
     for top_k in top_k_values:
         posterior_rows: list[pd.DataFrame] = []

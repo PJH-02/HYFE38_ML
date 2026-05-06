@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -128,12 +128,19 @@ class KiwoomRestClient:
         self.token = str(token)
         return self.token
 
-    def call_tr(self, endpoint: str, api_id: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+    def call_tr(
+        self,
+        endpoint: str,
+        api_id: str,
+        body: dict[str, Any],
+        max_pages: int | None = None,
+        stop_when: Callable[[list[dict[str, Any]]], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         token = self.ensure_token()
         rows: list[dict[str, Any]] = []
         cont_yn = "N"
         next_key = ""
-        max_pages = max(1, int(os.getenv("KIWOOM_MAX_PAGES", "1")))
+        max_pages = max(1, int(max_pages if max_pages is not None else os.getenv("KIWOOM_MAX_PAGES", "1")))
         page = 0
         while True:
             page += 1
@@ -146,6 +153,8 @@ class KiwoomRestClient:
             rows.extend(extract_records(payload))
             cont_yn = str(response_headers.get("cont-yn", response_headers.get("Cont-Yn", "N"))).upper()
             next_key = str(response_headers.get("next-key", response_headers.get("Next-Key", "")))
+            if stop_when is not None and stop_when(rows):
+                break
             if page >= max_pages or cont_yn != "Y" or not next_key:
                 break
             time.sleep(float(os.getenv("KIWOOM_CONT_SLEEP_SECONDS", "0.2")))
@@ -281,10 +290,161 @@ def parse_index_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
     parsed = {}
     for row in rows:
         date = normalize_date(first_value(row, ["dt", "dt_n", "date", "trd_dt"]))
-        close = clean_number(first_value(row, ["cur_prc", "cur_prc_n", "close", "clpr", "inds_clpr"]))
+        close = abs(clean_number(first_value(row, ["cur_prc", "cur_prc_n", "close", "clpr", "inds_clpr"])))
         if date and close > 0:
             parsed[date] = close
     return parsed
+
+
+def index_column_for_price_frame(df: pd.DataFrame) -> str:
+    if "index_close" in df.columns:
+        return "index_close"
+    if "kospi_close" in df.columns:
+        return "kospi_close"
+    raise ValueError("price CSV must contain index_close or kospi_close")
+
+
+def selected_price_dates(df: pd.DataFrame, from_date: str | None, to_date: str | None) -> list[str]:
+    dates = pd.to_datetime(df["date"], errors="raise").dt.strftime("%Y-%m-%d")
+    mask = pd.Series(True, index=df.index)
+    if from_date:
+        mask &= dates >= from_date
+    if to_date:
+        mask &= dates <= to_date
+    return sorted(dates.loc[mask].dropna().unique())
+
+
+def validate_index_series(index_by_date: dict[str, float], required_dates: list[str]) -> dict[str, Any]:
+    missing = [date for date in required_dates if date not in index_by_date]
+    if missing:
+        sample = missing[:10]
+        raise ValueError(f"KOSPI index fetch missing {len(missing)} required dates, examples={sample}")
+
+    values = pd.Series({date: float(index_by_date[date]) for date in required_dates}).sort_index()
+    if (values <= 0).any():
+        bad = values.loc[values <= 0].head(10).to_dict()
+        raise ValueError(f"KOSPI index close must be positive: {bad}")
+
+    min_close = float(os.getenv("KIWOOM_INDEX_MIN_CLOSE", "1000"))
+    max_close = float(os.getenv("KIWOOM_INDEX_MAX_CLOSE", "20000"))
+    out_of_scale = values.loc[(values < min_close) | (values > max_close)]
+    if not out_of_scale.empty:
+        sample = out_of_scale.head(10).to_dict()
+        raise ValueError(
+            f"KOSPI index close outside expected [{min_close}, {max_close}] range: {sample}. "
+            "Set KIWOOM_INDEX_MIN_CLOSE/KIWOOM_INDEX_MAX_CLOSE only after confirming the API scale."
+        )
+
+    log_returns = np_log_safe(values.astype(float) / values.astype(float).shift(1))
+    abnormal = log_returns.loc[log_returns.abs() > float(os.getenv("KIWOOM_INDEX_MAX_ABS_LOG_RETURN", "0.15"))]
+    if not abnormal.empty:
+        sample = abnormal.head(10).to_dict()
+        raise ValueError(f"KOSPI index close has abnormal daily log returns: {sample}")
+
+    return {
+        "date_count": int(len(values)),
+        "min_date": str(values.index.min()),
+        "max_date": str(values.index.max()),
+        "min_close": float(values.min()),
+        "max_close": float(values.max()),
+    }
+
+
+def np_log_safe(values: pd.Series) -> pd.Series:
+    import numpy as np
+
+    values = pd.to_numeric(values, errors="coerce")
+    return pd.Series(np.log(values), index=values.index).replace([np.inf, -np.inf], pd.NA).dropna()
+
+
+def overwrite_price_index_column(path: Path, index_by_date: dict[str, float], from_date: str | None, to_date: str | None) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    df = pd.read_csv(path, dtype={"ticker": "string"})
+    index_col = index_column_for_price_frame(df)
+    df[index_col] = pd.to_numeric(df[index_col], errors="coerce").astype(float)
+    date_text = pd.to_datetime(df["date"], errors="raise").dt.strftime("%Y-%m-%d")
+    required_dates = selected_price_dates(df, from_date, to_date)
+    validation = validate_index_series(index_by_date, required_dates)
+    mask = date_text.isin(required_dates)
+    df.loc[mask, index_col] = date_text.loc[mask].map(index_by_date).astype(float)
+    per_date_unique = df.loc[mask].groupby(date_text.loc[mask])[index_col].nunique(dropna=False)
+    if (per_date_unique != 1).any():
+        bad = per_date_unique.loc[per_date_unique != 1].head(10).to_dict()
+        raise ValueError(f"KOSPI index close is not identical across tickers for dates: {bad}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    return {
+        "path": str(path),
+        "index_column": index_col,
+        "rows_updated": int(mask.sum()),
+        **validation,
+    }
+
+
+def fetch_index_map(client: KiwoomRestClient, from_date: str | None, to_date: str | None) -> dict[str, float]:
+    index_endpoint = os.getenv("KIWOOM_INDEX_ENDPOINT", "/api/dostk/sect")
+    index_api_id = os.getenv("KIWOOM_INDEX_API_ID", "ka20009")
+    kospi_code = os.getenv("KIWOOM_KOSPI_CODE", "001")
+    index_body = {
+        "mrkt_tp": os.getenv("KIWOOM_INDEX_MARKET_TP", "0"),
+        "inds_cd": kospi_code,
+        "base_dt": (to_date or "").replace("-", ""),
+    }
+    max_pages = int(os.getenv("KIWOOM_INDEX_MAX_PAGES", os.getenv("KIWOOM_MAX_PAGES", "200")))
+    def reached_from_date(rows: list[dict[str, Any]]) -> bool:
+        if not from_date:
+            return False
+        parsed = parse_index_rows(rows)
+        return bool(parsed) and min(parsed) <= from_date
+
+    return parse_index_rows(
+        client.call_tr(index_endpoint, index_api_id, index_body, max_pages=max_pages, stop_when=reached_from_date)
+    )
+
+
+def run_index_only(args: argparse.Namespace) -> None:
+    target_paths = [args.price_out, *args.extra_price_out]
+    existing_paths = [path for path in target_paths if path.exists()]
+    if not existing_paths:
+        raise FileNotFoundError("At least one --price-out/--extra-price-out CSV must exist for --index-only")
+    all_dates: list[str] = []
+    for path in existing_paths:
+        all_dates.extend(selected_price_dates(pd.read_csv(path, dtype={"ticker": "string"}), None, None))
+    all_dates = sorted(set(all_dates))
+    from_date = args.from_date or all_dates[0]
+    to_date = args.to_date or all_dates[-1]
+
+    use_mock = os.getenv("KIWOOM_USE_MOCK", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    default_base_url = "https://mockapi.kiwoom.com" if use_mock else "https://api.kiwoom.com"
+    dry_run_payload = {
+        "mode": "index_only",
+        "from_date": from_date,
+        "to_date": to_date,
+        "targets": [str(path) for path in target_paths],
+        "base_url": os.getenv("KIWOOM_BASE_URL", default_base_url),
+        "index_endpoint": os.getenv("KIWOOM_INDEX_ENDPOINT", "/api/dostk/sect"),
+        "index_api_id": os.getenv("KIWOOM_INDEX_API_ID", "ka20009"),
+        "kospi_code": os.getenv("KIWOOM_KOSPI_CODE", "001"),
+        "index_max_pages": int(os.getenv("KIWOOM_INDEX_MAX_PAGES", os.getenv("KIWOOM_MAX_PAGES", "200"))),
+    }
+    if args.dry_run:
+        print(json.dumps(dry_run_payload, ensure_ascii=False, indent=2))
+        return
+
+    client = KiwoomRestClient(
+        base_url=str(dry_run_payload["base_url"]),
+        app_key=os.getenv("KIWOOM_APP_KEY", ""),
+        secret_key=os.getenv("KIWOOM_SECRET_KEY", ""),
+        token=os.getenv("KIWOOM_TOKEN", ""),
+        timeout=int(os.getenv("KIWOOM_TIMEOUT_SECONDS", "30")),
+    )
+    index_map = fetch_index_map(client, from_date, to_date)
+    summaries = [
+        overwrite_price_index_column(path, index_map, from_date, to_date)
+        for path in target_paths
+    ]
+    print(json.dumps({"index_rows_fetched": len(index_map), "targets": summaries}, ensure_ascii=False, indent=2))
 
 
 def filter_dates(rows: list[dict[str, Any]], from_date: str | None, to_date: str | None) -> list[dict[str, Any]]:
@@ -321,8 +481,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-price", type=Path, default=TESTING_DIR / "sector_all_merged.csv")
     parser.add_argument("--baseline-flow", type=Path, default=TESTING_DIR / "sector_fund_flow.csv")
     parser.add_argument("--price-out", type=Path, default=BASE_DIR / "data" / "sector_all_merged.csv")
+    parser.add_argument("--extra-price-out", type=Path, action="append", default=[], help="Additional price CSV to update in --index-only mode.")
     parser.add_argument("--flow-out", type=Path, default=BASE_DIR / "data" / "sector_fund_flow.csv")
     parser.add_argument("--amount-divisor", type=float, default=float(os.getenv("KIWOOM_AMOUNT_DIVISOR", "1")))
+    parser.add_argument("--index-only", action="store_true", help="Fetch only KOSPI index closes and overwrite price CSV index columns.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -330,6 +492,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
+    if args.index_only:
+        run_index_only(args)
+        return
+
     price_base = load_baseline(args.price_out if args.price_out.exists() else args.baseline_price, PRICE_COLUMNS)
     flow_base = load_baseline(args.flow_out if args.flow_out.exists() else args.baseline_flow, FLOW_COLUMNS)
     tickers = args.tickers or sorted(price_base["ticker"].dropna().astype(str).unique())

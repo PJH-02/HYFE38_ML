@@ -1,0 +1,6 @@
+{
+  "score_formula": "mean(sign(shrunk_predictive_corr) * actor_flow_z) over actors where abs(shrunk_predictive_corr) >= corr_threshold",
+  "corr_threshold": 0.1,
+  "no_selected_actor_rows": 390,
+  "no_selected_actor_report": "/app/flow_rank_no_selected_actor_report.csv"
+}

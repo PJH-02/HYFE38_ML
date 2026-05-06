@@ -40,6 +40,18 @@ FLOW_COLUMNS = [
 ]
 
 ROTATION_COLUMNS = [
+    "sector_rs_4w",
+    "sector_rs_rank_4w",
+    "leader_sector",
+    "leader_ticker",
+    "leader_persistence",
+    "leader_valid",
+    "leader_changed",
+    "transition_pair",
+    "transition_frequency",
+    "leader_persistence_score",
+    "transition_frequency_score",
+    "rotation_signal_week",
     "rotation_score_raw",
     "rotation_score",
     "rotation_rank",

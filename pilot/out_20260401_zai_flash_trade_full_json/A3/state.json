@@ -1,0 +1,37 @@
+{
+  "cash": 5335211.281350002,
+  "last_decision_date": "2026-05-04",
+  "last_decision_log": {
+    "fallback_used": false,
+    "model": "glm-4.7-flash",
+    "prompt_hash": "0a3bb8c624d1c9b9bacfd40d0da3a82fa39138a02ac468289374320607f67c8d",
+    "prompt_tokens": 1228,
+    "provider": "zai",
+    "repair_used": false,
+    "response_tokens": 215,
+    "success_sleep_seconds": 1.0
+  },
+  "last_marked_date": "2026-05-04",
+  "nav_close": 105263086.28135,
+  "pending_decision_date": "2026-05-04",
+  "pending_execution_date": "2026-05-06",
+  "pending_regime": {
+    "cash_weight": 0.05,
+    "regime_date": "2025-12-12",
+    "regime_key": "DRAI_RISK_ON",
+    "regime_name": "DRAI Risk-On",
+    "stock_weight": 0.95
+  },
+  "pending_stock_weight": 0.95,
+  "pending_weights": {
+    "139260": 0.3333333333333333,
+    "227550": 0.3333333333333333,
+    "266390": 0.3333333333333333
+  },
+  "qty": {
+    "266390": 2692.0,
+    "266410": 3264.0,
+    "476800": 6943.0
+  },
+  "strategy": "A3"
+}

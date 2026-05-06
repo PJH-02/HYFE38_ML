@@ -12,6 +12,7 @@ docs/
 
 # Local secrets
 testing/zai_llm_config.json
+testing/zai_glm_4_7_flash_local_config.json
 pilot/.env
 
 # Generated backtest and pilot outputs

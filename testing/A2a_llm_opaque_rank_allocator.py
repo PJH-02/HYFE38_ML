@@ -16,9 +16,23 @@ from typing import Any
 import pandas as pd
 
 try:
-    from A0_equal_weight import default_regime_path, load_regime_table, regime_stock_ratio_for_date
+    from A0_equal_weight import (
+        apply_regime_market_score,
+        build_trade_rows,
+        default_regime_path,
+        load_regime_table,
+        regime_info_for_date,
+        regime_stock_ratio_for_date,
+    )
 except ModuleNotFoundError:
-    from .A0_equal_weight import default_regime_path, load_regime_table, regime_stock_ratio_for_date
+    from .A0_equal_weight import (
+        apply_regime_market_score,
+        build_trade_rows,
+        default_regime_path,
+        load_regime_table,
+        regime_info_for_date,
+        regime_stock_ratio_for_date,
+    )
 
 
 ALLOWED_TOP_K = {3, 5, 7, 10}
@@ -91,7 +105,7 @@ def load_llm_config() -> dict[str, Any]:
     config_path = Path(os.getenv("LLM_CONFIG_PATH", DEFAULT_LLM_CONFIG_PATH))
     config: dict[str, Any] = {}
     if config_path.exists():
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
 
     provider = str(config.get("provider") or os.getenv("LLM_PROVIDER") or ("zai" if config_path.exists() else "openai"))
     api_key = (
@@ -620,11 +634,13 @@ def run_llm_backtest(
     regime = load_regime_table(regime_path)
     daily_path = out_path / "daily_results.csv"
     weights_path = out_path / "weights.csv"
+    trade_path = out_path / "trade_history.csv"
     log_path = out_path / "decision_log.jsonl"
     checkpoint_path = out_path / "checkpoint_state.json"
     state: dict[str, Any] = {"nav": INITIAL_NAV, "cash": INITIAL_NAV, "quantities": {}}
     daily_rows: list[dict[str, Any]] = []
     weight_rows: list[dict[str, Any]] = []
+    trade_rows: list[dict[str, Any]] = []
     log_rows: list[dict[str, Any]] = []
     fallback_count = 0
     completed_dates: set[str] = set()
@@ -636,6 +652,8 @@ def run_llm_backtest(
             state["quantities"] = {str(k): float(v) for k, v in state.get("quantities", {}).items()}
             daily_rows = pd.read_csv(daily_path).to_dict("records")
             weight_rows = pd.read_csv(weights_path).to_dict("records")
+            if trade_path.exists():
+                trade_rows = pd.read_csv(trade_path).to_dict("records")
             with log_path.open("r", encoding="utf-8") as handle:
                 log_rows = [json.loads(line) for line in handle if line.strip()]
             completed_dates = {str(row["decision_date"]) for row in daily_rows}
@@ -644,6 +662,7 @@ def run_llm_backtest(
     def persist_checkpoint(complete: bool = False) -> None:
         pd.DataFrame(daily_rows).to_csv(daily_path, index=False)
         pd.DataFrame(weight_rows).to_csv(weights_path, index=False)
+        pd.DataFrame(trade_rows).to_csv(trade_path, index=False)
         with log_path.open("w", encoding="utf-8") as handle:
             for row in log_rows:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
@@ -669,7 +688,8 @@ def run_llm_backtest(
         if decision_date_text in completed_dates:
             continue
         execution_date = dates[step + 1]
-        day_df = panel[panel["date"] == decision_date].copy()
+        regime_info = regime_info_for_date(regime, pd.Timestamp(execution_date))
+        day_df = apply_regime_market_score(panel[panel["date"] == decision_date], regime_info)
         next_df = panel[panel["date"] == execution_date].copy()
         if get_valid_universe(day_df).empty:
             continue
@@ -678,7 +698,22 @@ def run_llm_backtest(
         target_weights = decision.weights
         fallback_count += int(decision.fallback_used)
         execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, STOCK_RATIO)
+        old_quantities = {str(k): float(v) for k, v in state.get("quantities", {}).items()}
         state, result = rebalance_and_mark_to_market_next_day(state, target_weights, day_df, next_df, execution_stock_ratio)
+        trade_rows.extend(
+            build_trade_rows(
+                strategy=strategy,
+                decision_date=decision_date_text,
+                execution_date=pd.Timestamp(execution_date).date().isoformat(),
+                decision_df=day_df,
+                execution_df=next_df,
+                old_qty=old_quantities,
+                new_qty=state.get("quantities", {}),
+                target_sleeve_weights=target_weights,
+                result=result,
+                stock_ratio=execution_stock_ratio,
+            )
+        )
         daily_rows.append(
             {
                 "decision_date": decision_date_text,
