@@ -129,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        llm_strategy: [A2a, A2b, A3, A4]
+        llm_strategy: [A2b, A3, A4]
     env:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -204,11 +204,19 @@ jobs:
         with:
           ref: ${{ github.ref_name }}
 
-      - name: Download A2a state
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy matplotlib
+
+      - name: Download rebuilt ranks
         uses: actions/download-artifact@v4
         with:
-          name: etf-rank-llm-state-A2a-${{ github.run_id }}
-          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A2a_k10
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
 
       - name: Download A2b state
         uses: actions/download-artifact@v4
@@ -227,6 +235,9 @@ jobs:
         with:
           name: etf-rank-llm-state-A4-${{ github.run_id }}
           path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A4_k10
+
+      - name: Remove retired A2a state
+        run: rm -rf testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A2a_k10
 
       - name: Update committed chunk state
         run: |
@@ -252,6 +263,18 @@ jobs:
         env:
           START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
           END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
+
+      - name: Build final full-period report
+        if: needs.prepare-ranks.outputs.end_month == needs.prepare-ranks.outputs.last_month
+        working-directory: testing
+        run: |
+          python -u A0_equal_weight.py --out-root "$OUT_ROOT"
+          python -u A1_rule_based_rank_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
+          python -u A5_bayesian_winner_loser_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
+          python -u build_final_backtest_report.py \
+            --out-root "$OUT_ROOT" \
+            --rank-panel rank_panel.csv \
+            --report-dir backtest_state/final_report
 
       - name: Commit backtest state
         run: |
