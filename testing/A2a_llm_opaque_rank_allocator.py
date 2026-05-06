@@ -41,6 +41,64 @@ COMMISSION_RATE = 0.00015
 STOCK_RATIO = 1.0
 DEFAULT_MODEL = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "glm-5.1"
 DEFAULT_LLM_CONFIG_PATH = Path(__file__).resolve().parent / "zai_llm_config.json"
+DAILY_RESULT_COLUMNS = [
+    "decision_date",
+    "execution_date",
+    "strategy",
+    "nav_close",
+    "nav_open_pre",
+    "nav_open_post",
+    "overnight_pnl",
+    "open_to_close_pnl",
+    "commission",
+    "turnover_value",
+    "turnover_ratio",
+    "daily_return",
+    "stock_ratio",
+    "fallback_used",
+    "effective_num_positions",
+]
+WEIGHT_COLUMNS = [
+    "decision_date",
+    "execution_date",
+    "ticker",
+    "ETF_id",
+    "sleeve_weight",
+    "portfolio_weight",
+]
+TRADE_COLUMNS = [
+    "strategy",
+    "decision_date",
+    "execution_date",
+    "ticker",
+    "ETF_id",
+    "name",
+    "open",
+    "close",
+    "prev_qty",
+    "target_qty",
+    "delta_qty",
+    "side",
+    "prev_value_open",
+    "target_value_open",
+    "delta_value_open",
+    "trade_turnover_value",
+    "day_turnover_value",
+    "commission_allocated",
+    "day_commission",
+    "nav_open_pre",
+    "nav_open_post",
+    "nav_close",
+    "daily_return",
+    "stock_ratio",
+    "cash_weight",
+    "target_sleeve_weight",
+    "target_portfolio_weight",
+    "prev_portfolio_weight_open",
+    "actual_portfolio_weight_open",
+    "cash_after_rebalance",
+    "rebalanced",
+]
 
 
 @dataclass
@@ -81,6 +139,22 @@ def load_rank_panel(path: str | Path) -> pd.DataFrame:
     if "asset_id" not in panel.columns:
         panel = panel.merge(create_id_mapping(panel)[["ticker", "asset_id"]], on="ticker", how="left")
     return panel.sort_values(["date", "ticker"]).reset_index(drop=True)
+
+
+def read_csv_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    try:
+        return pd.read_csv(path).to_dict("records")
+    except pd.errors.EmptyDataError:
+        return []
+
+
+def write_csv_records(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        frame = pd.DataFrame(columns=columns)
+    frame.to_csv(path, index=False)
 
 
 def _is_placeholder_secret(value: str | None) -> bool:
@@ -700,19 +774,19 @@ def run_llm_backtest(
         if checkpoint.get("strategy") == strategy and int(checkpoint.get("top_k", -1)) == int(top_k):
             state = checkpoint.get("state", state)
             state["quantities"] = {str(k): float(v) for k, v in state.get("quantities", {}).items()}
-            daily_rows = pd.read_csv(daily_path).to_dict("records")
-            weight_rows = pd.read_csv(weights_path).to_dict("records")
+            daily_rows = read_csv_records(daily_path)
+            weight_rows = read_csv_records(weights_path)
             if trade_path.exists():
-                trade_rows = pd.read_csv(trade_path).to_dict("records")
+                trade_rows = read_csv_records(trade_path)
             with log_path.open("r", encoding="utf-8") as handle:
                 log_rows = [json.loads(line) for line in handle if line.strip()]
             completed_dates = {str(row["decision_date"]) for row in daily_rows}
             fallback_count = sum(1 for row in daily_rows if bool(row.get("fallback_used")))
 
     def persist_checkpoint(complete: bool = False) -> None:
-        pd.DataFrame(daily_rows).to_csv(daily_path, index=False)
-        pd.DataFrame(weight_rows).to_csv(weights_path, index=False)
-        pd.DataFrame(trade_rows).to_csv(trade_path, index=False)
+        write_csv_records(daily_path, daily_rows, DAILY_RESULT_COLUMNS)
+        write_csv_records(weights_path, weight_rows, WEIGHT_COLUMNS)
+        write_csv_records(trade_path, trade_rows, TRADE_COLUMNS)
         with log_path.open("w", encoding="utf-8") as handle:
             for row in log_rows:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
