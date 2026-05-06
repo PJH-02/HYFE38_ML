@@ -1,6 +1,48 @@
 {
-  "score_formula": "mean(sign(shrunk_predictive_corr) * actor_flow_z) over actors where abs(shrunk_predictive_corr) >= corr_threshold",
+  "score_formula": "mean(actor_direction * actor_flow_z) over selected actors",
   "corr_threshold": 0.1,
-  "no_selected_actor_rows": 395,
+  "actor_selection_mode": "team_static",
+  "team_static_includes_weak_directional_classes": true,
+  "team_static_flow_directions": {
+    "Energy": {
+      "total_net_buy": 1.0,
+      "institution_net_buy": 1.0,
+      "individual_net_buy": -1.0
+    },
+    "Materials": {
+      "total_net_buy": -1.0,
+      "institution_net_buy": -1.0
+    },
+    "Information Technology": {
+      "total_net_buy": 1.0,
+      "institution_net_buy": 1.0,
+      "individual_net_buy": -1.0
+    },
+    "Financials": {},
+    "Industrials": {
+      "foreign_net_buy": -1.0
+    },
+    "Consumer Discretionary": {
+      "individual_net_buy": 1.0
+    },
+    "Consumer Staples": {
+      "total_net_buy": 1.0,
+      "institution_net_buy": 1.0,
+      "individual_net_buy": -1.0
+    },
+    "Health Care": {
+      "total_net_buy": -1.0,
+      "institution_net_buy": -1.0,
+      "individual_net_buy": 1.0
+    },
+    "Communication Services": {},
+    "Real Estate": {
+      "total_net_buy": 1.0,
+      "foreign_net_buy": -1.0,
+      "institution_net_buy": 1.0,
+      "individual_net_buy": -1.0
+    }
+  },
+  "no_selected_actor_rows": 1352,
   "no_selected_actor_report": "C:\\Users\\박제형\\Desktop\\ML6\\pilot\\work\\flow_rank_no_selected_actor_report.csv"
 }

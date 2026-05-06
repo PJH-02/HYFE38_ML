@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import warnings
 from pathlib import Path
 
@@ -29,6 +30,48 @@ DERIVED_FLOW_ACTOR_COLUMNS = ["total_net_buy"]
 FLOW_ACTOR_COLUMNS = DERIVED_FLOW_ACTOR_COLUMNS + BASE_FLOW_ACTOR_COLUMNS
 PRICE_COLUMNS = ["date", "ticker", "name", "gics_sector", "open", "close", "volume", "amount"]
 EPS = 1.0e-12
+ACTOR_SELECTION_MODES = {"dynamic", "team_static"}
+
+TEAM_STATIC_FLOW_DIRECTIONS = {
+    "Energy": {
+        "total_net_buy": 1.0,
+        "institution_net_buy": 1.0,
+        "individual_net_buy": -1.0,
+    },
+    "Materials": {
+        "total_net_buy": -1.0,
+        "institution_net_buy": -1.0,
+    },
+    "Information Technology": {
+        "total_net_buy": 1.0,
+        "institution_net_buy": 1.0,
+        "individual_net_buy": -1.0,
+    },
+    "Financials": {},
+    "Industrials": {
+        "foreign_net_buy": -1.0,
+    },
+    "Consumer Discretionary": {
+        "individual_net_buy": 1.0,
+    },
+    "Consumer Staples": {
+        "total_net_buy": 1.0,
+        "institution_net_buy": 1.0,
+        "individual_net_buy": -1.0,
+    },
+    "Health Care": {
+        "total_net_buy": -1.0,
+        "institution_net_buy": -1.0,
+        "individual_net_buy": 1.0,
+    },
+    "Communication Services": {},
+    "Real Estate": {
+        "total_net_buy": 1.0,
+        "foreign_net_buy": -1.0,
+        "institution_net_buy": 1.0,
+        "individual_net_buy": -1.0,
+    },
+}
 
 
 def load_price_and_flow(
@@ -194,6 +237,22 @@ def select_predictive_actors(
     return out
 
 
+def select_team_static_actors(df: pd.DataFrame, actor_cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for actor in actor_cols:
+        out[f"{actor}_selected"] = False
+        out[f"{actor}_direction"] = 0.0
+
+    for sector, actor_directions in TEAM_STATIC_FLOW_DIRECTIONS.items():
+        sector_mask = out["gics_sector"].astype(str).eq(sector)
+        for actor, direction in actor_directions.items():
+            if actor not in actor_cols:
+                continue
+            out.loc[sector_mask, f"{actor}_selected"] = True
+            out.loc[sector_mask, f"{actor}_direction"] = float(direction)
+    return out
+
+
 def compute_flow_score(df: pd.DataFrame, actor_cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     contributions = []
@@ -280,7 +339,13 @@ def output_columns(actor_cols: list[str]) -> list[str]:
     return cols
 
 
-def save_flow_rank(df: pd.DataFrame, out_path: str | Path, actor_cols: list[str], corr_threshold: float) -> None:
+def save_flow_rank(
+    df: pd.DataFrame,
+    out_path: str | Path,
+    actor_cols: list[str],
+    corr_threshold: float,
+    actor_selection_mode: str,
+) -> None:
     out = df[output_columns(actor_cols)].copy()
     validate_no_lookahead_flow(out)
     out["date"] = out["date"].dt.strftime("%Y-%m-%d")
@@ -292,8 +357,11 @@ def save_flow_rank(df: pd.DataFrame, out_path: str | Path, actor_cols: list[str]
     no_actor.to_csv(report_path, index=False)
     meta_path = Path(out_path).with_name(Path(out_path).stem + "_metadata.json")
     meta = {
-        "score_formula": "mean(sign(shrunk_predictive_corr) * actor_flow_z) over actors where abs(shrunk_predictive_corr) >= corr_threshold",
+        "score_formula": "mean(actor_direction * actor_flow_z) over selected actors",
         "corr_threshold": corr_threshold,
+        "actor_selection_mode": actor_selection_mode,
+        "team_static_includes_weak_directional_classes": actor_selection_mode == "team_static",
+        "team_static_flow_directions": TEAM_STATIC_FLOW_DIRECTIONS if actor_selection_mode == "team_static" else None,
         "no_selected_actor_rows": int(len(no_actor)),
         "no_selected_actor_report": str(report_path),
     }
@@ -308,7 +376,11 @@ def build_flow_rank(
     min_obs: int = 20,
     shrink_k: float = 20.0,
     corr_threshold: float = 0.10,
+    actor_selection_mode: str | None = None,
 ) -> pd.DataFrame:
+    mode = actor_selection_mode or os.getenv("FLOW_ACTOR_SELECTION_MODE", "dynamic")
+    if mode not in ACTOR_SELECTION_MODES:
+        raise ValueError(f"actor_selection_mode must be one of {sorted(ACTOR_SELECTION_MODES)}, got {mode}")
     _, _, df = load_price_and_flow(price_path, flow_path)
     df = compute_internal_next_open_to_close_label(df)
     df = normalize_actor_flows(df, FLOW_ACTOR_COLUMNS)
@@ -316,10 +388,13 @@ def build_flow_rank(
     df = compute_rolling_flow_zscore(df, FLOW_ACTOR_COLUMNS, lookback=lookback, min_obs=min_obs)
     df = compute_predictive_actor_corr(df, FLOW_ACTOR_COLUMNS, lookback=lookback, min_obs=min_obs)
     df = shrink_predictive_corr(df, FLOW_ACTOR_COLUMNS, shrink_k=shrink_k)
-    df = select_predictive_actors(df, FLOW_ACTOR_COLUMNS, corr_threshold=corr_threshold)
+    if mode == "team_static":
+        df = select_team_static_actors(df, FLOW_ACTOR_COLUMNS)
+    else:
+        df = select_predictive_actors(df, FLOW_ACTOR_COLUMNS, corr_threshold=corr_threshold)
     df = compute_flow_score(df, FLOW_ACTOR_COLUMNS)
     df = make_flow_rank(df, lookback=lookback, min_obs=min_obs, actor_cols=FLOW_ACTOR_COLUMNS)
-    save_flow_rank(df, output_path, FLOW_ACTOR_COLUMNS, corr_threshold=corr_threshold)
+    save_flow_rank(df, output_path, FLOW_ACTOR_COLUMNS, corr_threshold=corr_threshold, actor_selection_mode=mode)
     return df
 
 
@@ -333,6 +408,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-obs", type=int, default=20)
     parser.add_argument("--shrink-k", type=float, default=20.0)
     parser.add_argument("--corr-threshold", type=float, default=0.10)
+    parser.add_argument("--actor-selection-mode", choices=sorted(ACTOR_SELECTION_MODES), default=None)
     return parser.parse_args()
 
 
@@ -346,6 +422,7 @@ def main() -> None:
         min_obs=args.min_obs,
         shrink_k=args.shrink_k,
         corr_threshold=args.corr_threshold,
+        actor_selection_mode=args.actor_selection_mode,
     )
     print(f"Wrote {args.output}")
 

@@ -57,16 +57,16 @@ def build_semantic_prompt(packet: dict[str, Any], top_k: int = 10) -> str:
     prompt = {
         "instructions": [
             "Use only the provided ranks and scores.",
-            "market_rank: regime-adjusted broad-market co-movement rank. In risk-on regimes rank 1 favors higher recent rolling correlation to the broad market; in risk-off or neutral regimes rank 1 favors lower recent rolling correlation. It is a market co-movement signal, not a standalone return forecast.",
+            "market_rank: regime-adjusted broad-index co-movement rank. In risk-on regimes rank 1 favors higher recent rolling correlation to the broad index; in risk-off or neutral regimes rank 1 favors lower recent rolling correlation. It is a co-movement signal, not a standalone return forecast.",
             "market_score: 0 to 1 cross-sectional normalization of the regime-adjusted market_rank; higher is better under the active regime rule.",
-            "flow_rank: rank 1 means the ETF has the strongest investor-flow signal after selecting only flow actors whose past predictive correlation exceeded the threshold for that ETF. Actor z-scores are direction-adjusted by the historical correlation sign and then equal-weighted.",
+            "flow_rank: rank 1 means the asset has the strongest investor-flow signal after selecting only flow actors whose past predictive correlation exceeded the threshold for that asset. Actor z-scores are direction-adjusted by the historical correlation sign and then equal-weighted.",
             "flow_score: 0 to 1 cross-sectional normalization of flow_rank; higher means more favorable historically predictive flow pressure.",
-            "rotation_rank: rank 1 means the ETF has the strongest latest close-to-close cross-sectional price rotation among the valid universe.",
-            "rotation_score: 0 to 1 cross-sectional normalization of rotation_rank; higher means stronger recent relative price momentum.",
+            "rotation_rank: rank 1 means the asset has the strongest latest completed weekly rotation signal among the valid universe. The signal combines equal-weighted components: 4-week broad-index-relative strength, valid leader persistence, and historical transition-pair frequency. Weekly signals are available only after the relevant week has completed and are then carried forward to daily decisions.",
+            "rotation_score: 0 to 1 cross-sectional normalization of rotation_rank; higher means stronger completed-week relative-strength/leader/transition rotation evidence.",
             "All ranks are point-in-time signals available after the decision date close for next-open execution.",
             "Do not use outside knowledge, external labels, news, or memory.",
             "Allocate 100% of the predefined asset sleeve.",
-            "Return JSON only with decision_step and target_weights.",
+            "Return JSON only with target_weights.",
             "target_weights must be a list of objects: [{\"asset_id\":\"asset_001\",\"sleeve_weight\":0.25}].",
         ],
         "constraints": {

@@ -46,9 +46,9 @@ def load_policy_pack() -> dict[str, Any]:
             "Weak ranks across all signals should receive zero or minimal weight.",
         ],
         "signal_definitions": {
-            "market_rank": "regime-adjusted broad-market co-movement rank: risk-on favors higher recent rolling broad-market correlation; risk-off and neutral favor lower recent rolling broad-market correlation.",
-            "flow_rank": "rank 1 is the strongest selected-actor investor-flow signal; selected actor z-scores are sign-adjusted by historical predictive correlation and equal-weighted.",
-            "rotation_rank": "rank 1 is the strongest latest close-to-close cross-sectional price rotation.",
+            "market_rank": "regime-adjusted broad-index co-movement rank: risk-on favors higher recent rolling broad-index correlation; risk-off and neutral favor lower recent rolling broad-index correlation.",
+            "flow_rank": "rank 1 is the strongest selected-actor investor-flow signal for the asset; selected actor z-scores are sign-adjusted by historical predictive correlation and equal-weighted.",
+            "rotation_rank": "rank 1 is the strongest latest completed weekly rotation signal, built from equal-weighted 4-week broad-index-relative strength, valid leader persistence, and historical transition-pair frequency; weekly signals are used only after completion and then carried forward to daily decisions.",
         },
         "reason_code_enum": sorted(REASON_CODE_ENUM),
     }
@@ -70,7 +70,7 @@ def build_policy_prompt(packet: dict[str, Any], policy_pack: dict[str, Any], top
             "Interpret market_rank, flow_rank, and rotation_rank according to policy_pack.signal_definitions.",
             "Do not use outside knowledge, external labels, news, or memory.",
             "Allocate 100% of the predefined asset sleeve.",
-            "Return JSON only with decision_step, target_weights, and portfolio_reason_codes.",
+            "Return JSON only with target_weights and portfolio_reason_codes.",
             "target_weights must be a list of objects: [{\"asset_id\":\"asset_001\",\"sleeve_weight\":0.25,\"reason_codes\":[\"rank_alignment_strong\"]}].",
         ],
         "constraints": {

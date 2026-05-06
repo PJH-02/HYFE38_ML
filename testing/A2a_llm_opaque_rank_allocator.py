@@ -263,6 +263,7 @@ def build_opaque_packet(
     id_mapping: pd.DataFrame,
     decision_step: int = 0,
 ) -> dict[str, Any]:
+    _ = decision_step
     valid = get_valid_universe(day_df).merge(id_mapping, on="ticker", how="left", suffixes=("", "_map"))
     if "asset_id_map" in valid.columns:
         valid["asset_id"] = valid["asset_id"].fillna(valid["asset_id_map"])
@@ -281,8 +282,6 @@ def build_opaque_packet(
             }
         )
     return {
-        "decision_step": int(decision_step),
-        "is_initial_decision": not any(current_weights.values()),
         "constraints": {
             "rank_1_is_best": True,
             "higher_score_is_better": True,
@@ -300,7 +299,7 @@ def build_opaque_prompt(packet: dict[str, Any], top_k: int = 10) -> str:
             "Higher score is better.",
             "Use only the provided ranks and scores.",
             "Allocate 100% of the predefined asset sleeve across the provided asset_id universe.",
-            "Return JSON only with decision_step and target_weights.",
+            "Return JSON only with target_weights.",
             "target_weights must be a list of objects: [{\"asset_id\":\"asset_001\",\"sleeve_weight\":0.25}].",
         ],
         "constraints": {
@@ -490,7 +489,6 @@ def repair_invalid_llm_output_once(
     if total <= 0.0:
         return None, False
     repaired = {
-        "decision_step": parsed.get("decision_step"),
         "target_weights": [
             {"asset_id": asset_id, "sleeve_weight": weight / total}
             for asset_id, weight in sorted(weights.items())
@@ -800,7 +798,6 @@ def run_llm_backtest(
             )
         log_rows.append(
             {
-                "decision_step": step,
                 "strategy": strategy,
                 "top_k": top_k,
                 **decision.log,

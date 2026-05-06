@@ -56,7 +56,7 @@ def build_blend_policy_prompt(packet: dict[str, Any], top_k: int = 10) -> str:
             "Treat base_sleeve_weight as a rule-based reference, not as mandatory final weight.",
             "Do not use outside knowledge, external labels, news, or memory.",
             "Allocate 100% of the predefined asset sleeve.",
-            "Return JSON only with decision_step, target_weights, and portfolio_reason_codes.",
+            "Return JSON only with target_weights and portfolio_reason_codes.",
             "target_weights must be a list of objects: [{\"asset_id\":\"asset_001\",\"sleeve_weight\":0.25,\"reason_codes\":[\"rank_alignment_strong\"]}].",
         ],
         "constraints": {
