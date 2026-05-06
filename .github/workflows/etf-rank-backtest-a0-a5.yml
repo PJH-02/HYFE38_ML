@@ -1,4 +1,4 @@
-name: ETF Rank Backtest A0-A5
+name: ETF Rank Backtest A3-A4 Resume
 
 on:
   workflow_dispatch:
@@ -91,45 +91,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  fast-backtests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    needs: prepare-ranks
-    if: needs.prepare-ranks.outputs.should_run == '1'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip pandas numpy
-
-      - name: Download rebuilt ranks
-        uses: actions/download-artifact@v4
-        with:
-          name: rebuilt-ranks-${{ github.run_id }}
-          path: testing
-
-      - name: Run A0/A1/A5 backtests
-        working-directory: testing
-        run: |
-          python -u A0_equal_weight.py --out-root "$OUT_ROOT"
-          python -u A1_rule_based_rank_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
-          python -u A5_bayesian_winner_loser_allocator.py --out-root "$OUT_ROOT" --top-k "$TOP_K_VALUES"
-
-      - name: Upload fast backtest outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: etf-rank-fast-backtests-${{ github.run_id }}
-          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/
-          if-no-files-found: warn
-          retention-days: 14
-
   llm-backtest-chunk:
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -138,9 +99,9 @@ jobs:
     name: LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
-        llm_strategy: [A2b, A3, A4]
+        llm_strategy: [A3, A4]
     env:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -207,7 +168,7 @@ jobs:
   commit-backtest-state:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [prepare-ranks, fast-backtests, llm-backtest-chunk]
+    needs: [prepare-ranks, llm-backtest-chunk]
     if: needs.prepare-ranks.outputs.should_run == '1'
     steps:
       - name: Checkout
@@ -228,18 +189,6 @@ jobs:
         with:
           name: rebuilt-ranks-${{ github.run_id }}
           path: testing/_rebuilt_ranks
-
-      - name: Download A0/A1/A5 state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-fast-backtests-${{ github.run_id }}
-          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10
-
-      - name: Download A2b state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-state-A2b-${{ github.run_id }}
-          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A2b_k10
 
       - name: Download A3 state
         uses: actions/download-artifact@v4
@@ -288,7 +237,8 @@ jobs:
           python -u build_final_backtest_report.py \
             --out-root "$OUT_ROOT" \
             --rank-panel _rebuilt_ranks/rank_panel.csv \
-            --report-dir backtest_state/final_report
+            --report-dir backtest_state/final_report_a3_a4 \
+            --models A3,A4
 
       - name: Commit backtest state
         id: commit_state

@@ -183,14 +183,21 @@ def main() -> None:
     parser.add_argument("--out-root", type=Path, default=Path("backtest_state/out_actions_flow_v2_a0_a5_k10"))
     parser.add_argument("--rank-panel", type=Path, default=Path("rank_panel.csv"))
     parser.add_argument("--report-dir", type=Path, default=Path("backtest_state/final_report"))
+    parser.add_argument("--models", default=",".join(MODEL_DIRS), help="Comma-separated model labels to include.")
     args = parser.parse_args()
 
-    daily_parts = [load_model_daily(args.out_root, label, directory) for label, directory in MODEL_DIRS.items()]
+    selected_models = [model.strip() for model in args.models.split(",") if model.strip()]
+    if not selected_models:
+        raise ValueError("--models must include at least one model")
+    unknown_models = sorted(set(selected_models) - set(MODEL_DIRS))
+    if unknown_models:
+        raise ValueError(f"Unknown models: {unknown_models}")
+    daily_parts = [load_model_daily(args.out_root, label, MODEL_DIRS[label]) for label in selected_models]
     execution_dates = daily_parts[0]["execution_date"]
     initial_nav = infer_initial_nav(daily_parts[0])
     daily_parts.append(load_kospi_buy_hold(args.rank_panel, execution_dates, initial_nav))
     daily = pd.concat(daily_parts, ignore_index=True)
-    order = list(MODEL_DIRS) + [BENCHMARK_LABEL]
+    order = selected_models + [BENCHMARK_LABEL]
     daily["model"] = pd.Categorical(daily["model"], categories=order, ordered=True)
     daily = daily.sort_values(["model", "execution_date"]).reset_index(drop=True)
     metrics = compute_metrics(daily)
