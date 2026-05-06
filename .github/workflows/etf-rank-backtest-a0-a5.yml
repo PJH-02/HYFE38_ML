@@ -16,22 +16,33 @@ jobs:
       LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
       LLM_MODEL: z-ai/glm4.7
       LLM_TIMEOUT_SECONDS: "180"
-      LLM_MAX_TOKENS: "1024"
-      LLM_MAX_RETRIES: "4"
-      LLM_RETRY_SLEEP_SECONDS: "10"
-      LLM_SUCCESS_SLEEP_SECONDS: "0"
+      LLM_MAX_TOKENS: "2048"
+      LLM_MAX_RETRIES: "8"
+      LLM_RETRY_SLEEP_SECONDS: "20"
+      LLM_SUCCESS_SLEEP_SECONDS: "1"
+      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
+      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+      LLM_FAIL_ON_FALLBACK: "1"
       REGIME_CSV_PATH: /app/regime_weights.csv
       OUT_ROOT: /app/out_actions_flow_v2_a0_a5_k10
       TOP_K_VALUES: "10"
       REBUILD_RANKS: "1"
       RUN_A0_A1_A5: "1"
       RUN_LLM: "1"
-      RUN_LLM_PARALLEL: "1"
+      RUN_LLM_PARALLEL: "0"
       RUN_A6: "0"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy
 
       - name: Validate NVIDIA secret
         run: |
@@ -42,7 +53,7 @@ jobs:
 
       - name: Run full-period A0-A5 backtest from rebuilt ranks
         working-directory: testing
-        run: docker compose run --rm etf-backtest
+        run: python -u run_full_backtest.py
 
       - name: Upload backtest outputs
         if: always()

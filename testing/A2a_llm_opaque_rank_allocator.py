@@ -100,6 +100,25 @@ def _config_or_env(config: dict[str, Any], key: str, env_key: str, default: Any)
     return default
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _json_config_or_env(config: dict[str, Any], key: str, env_key: str) -> Any:
+    if key in config:
+        return config[key]
+    raw = os.getenv(env_key)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{env_key} must be valid JSON") from exc
+
+
 @lru_cache(maxsize=1)
 def load_llm_config() -> dict[str, Any]:
     config_path = Path(os.getenv("LLM_CONFIG_PATH", DEFAULT_LLM_CONFIG_PATH))
@@ -129,6 +148,11 @@ def load_llm_config() -> dict[str, Any]:
     max_retries = int(_config_or_env(config, "max_retries", "LLM_MAX_RETRIES", 1))
     retry_sleep_seconds = float(_config_or_env(config, "retry_sleep_seconds", "LLM_RETRY_SLEEP_SECONDS", 0.0))
     success_sleep_seconds = float(_config_or_env(config, "success_sleep_seconds", "LLM_SUCCESS_SLEEP_SECONDS", 0.0))
+    response_format = _json_config_or_env(config, "response_format", "LLM_RESPONSE_FORMAT")
+    if response_format is None and _env_flag("LLM_RESPONSE_FORMAT_JSON", False):
+        response_format = {"type": "json_object"}
+    thinking = _json_config_or_env(config, "thinking", "LLM_THINKING")
+    chat_template_kwargs = _json_config_or_env(config, "chat_template_kwargs", "LLM_CHAT_TEMPLATE_KWARGS")
     return {
         **config,
         "provider": provider,
@@ -142,6 +166,9 @@ def load_llm_config() -> dict[str, Any]:
         "max_retries": max_retries,
         "retry_sleep_seconds": retry_sleep_seconds,
         "success_sleep_seconds": success_sleep_seconds,
+        "response_format": response_format,
+        "thinking": thinking,
+        "chat_template_kwargs": chat_template_kwargs,
     }
 
 
@@ -322,7 +349,8 @@ def call_llm(prompt: str, model: str | None = None, timeout: int | None = None) 
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             last_error = f"HTTP {exc.code}: {body[:1000]}"
-            should_retry = exc.code in {408, 429, 500, 502, 503, 504} and '"1113"' not in body and '"1211"' not in body
+            retryable_degraded = "DEGRADED function cannot be invoked" in body
+            should_retry = (exc.code in {408, 429, 500, 502, 503, 504} or retryable_degraded) and '"1113"' not in body and '"1211"' not in body
             if not should_retry or attempt == max_retries:
                 return None, {"provider": provider, "model": model, "error": last_error, "attempts": attempt}
             time.sleep(float(config.get("retry_sleep_seconds", 0.0)) * attempt)
@@ -348,6 +376,25 @@ def call_llm(prompt: str, model: str | None = None, timeout: int | None = None) 
         "response_tokens": int(usage.get("completion_tokens", 0)),
         "success_sleep_seconds": success_sleep_seconds,
     }
+
+
+def classify_llm_failure(call_meta: dict[str, Any], validation_errors: list[str]) -> str:
+    llm_config = load_llm_config()
+    if _is_placeholder_secret(str(llm_config.get("api_key", ""))):
+        return "missing_api_key"
+    error = str(call_meta.get("error", ""))
+    lowered = error.lower()
+    if "degraded function cannot be invoked" in lowered:
+        return "llm_degraded"
+    if "http 429" in lowered or "too many requests" in lowered:
+        return "llm_rate_limited"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "llm_timeout"
+    if error:
+        return "llm_call_failed"
+    if validation_errors:
+        return "invalid_llm_output"
+    return "llm_failed"
 
 
 def parse_llm_json(response: str | None) -> dict[str, Any] | None:
@@ -482,13 +529,12 @@ def generate_A2a_weight(
         repaired, repair_used = repair_invalid_llm_output_once(parsed, valid_asset_ids, top_k)
         ok, asset_weights, errors = validate_llm_sleeve_weights(repaired, valid_asset_ids, top_k)
     if not ok:
-        llm_config = load_llm_config()
         return DecisionResult(
             base_weights,
             True,
             {
                 "fallback_used": True,
-                "fallback_reason": "missing_api_key" if _is_placeholder_secret(str(llm_config.get("api_key", ""))) else "invalid_llm_output",
+                "fallback_reason": classify_llm_failure(call_meta, errors),
                 "validation_errors": errors,
                 "repair_used": repair_used,
                 "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -644,6 +690,7 @@ def run_llm_backtest(
     log_rows: list[dict[str, Any]] = []
     fallback_count = 0
     completed_dates: set[str] = set()
+    fail_on_fallback = _env_flag("LLM_FAIL_ON_FALLBACK", False)
 
     if checkpoint_path.exists() and daily_path.exists() and weights_path.exists() and log_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -696,6 +743,20 @@ def run_llm_backtest(
         current_weights = _current_sleeve_weights(state, day_df)
         decision = generator(day_df, current_weights, top_k=top_k, decision_step=step, id_mapping=id_mapping)
         target_weights = decision.weights
+        if fail_on_fallback and decision.fallback_used:
+            failure_log = {
+                "strategy": strategy,
+                "top_k": top_k,
+                "decision_date": decision_date_text,
+                "decision_step": step,
+                **decision.log,
+            }
+            log_rows.append(failure_log)
+            persist_checkpoint()
+            raise RuntimeError(
+                "LLM fallback blocked by LLM_FAIL_ON_FALLBACK=1: "
+                + json.dumps(failure_log, ensure_ascii=False, sort_keys=True, default=str)
+            )
         fallback_count += int(decision.fallback_used)
         execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, STOCK_RATIO)
         old_quantities = {str(k): float(v) for k, v in state.get("quantities", {}).items()}

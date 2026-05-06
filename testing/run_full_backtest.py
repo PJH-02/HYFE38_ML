@@ -130,7 +130,7 @@ def run_llm_backtests(values: list[int], root: Path) -> None:
         ("A3_llm_policy_pack_allocator.py", "A3"),
         ("A4_rule_based_llm_blend.py", "A4"),
     ]
-    parallel = env_flag("RUN_LLM_PARALLEL", True)
+    parallel = env_flag("RUN_LLM_PARALLEL", False)
     for top_k in values:
         if parallel:
             batch = [spawn_llm(script, name, top_k, root) for script, name in scripts]
