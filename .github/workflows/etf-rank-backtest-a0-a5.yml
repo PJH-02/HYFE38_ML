@@ -138,6 +138,7 @@ jobs:
     name: LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         llm_strategy: [A2b, A3, A4]
     env:
@@ -150,9 +151,9 @@ jobs:
       LLM_MODEL: z-ai/glm4.7
       LLM_TIMEOUT_SECONDS: "180"
       LLM_MAX_TOKENS: "2048"
-      LLM_MAX_RETRIES: "8"
-      LLM_RETRY_SLEEP_SECONDS: "20"
-      LLM_SUCCESS_SLEEP_SECONDS: "1"
+      LLM_MAX_RETRIES: "12"
+      LLM_RETRY_SLEEP_SECONDS: "30"
+      LLM_SUCCESS_SLEEP_SECONDS: "2"
       LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
       LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
       LLM_FAIL_ON_FALLBACK: "1"

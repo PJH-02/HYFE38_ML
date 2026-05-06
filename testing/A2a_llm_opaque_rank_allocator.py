@@ -386,6 +386,18 @@ def build_opaque_prompt(packet: dict[str, Any], top_k: int = 10) -> str:
     return json.dumps(prompt, ensure_ascii=True, separators=(",", ":"))
 
 
+def _retry_after_seconds(headers: Any) -> float:
+    if headers is None:
+        return 0.0
+    retry_after = headers.get("Retry-After")
+    if not retry_after:
+        return 0.0
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def call_llm(prompt: str, model: str | None = None, timeout: int | None = None) -> tuple[str | None, dict[str, Any]]:
     config = load_llm_config()
     provider = str(config["provider"])
@@ -413,6 +425,7 @@ def call_llm(prompt: str, model: str | None = None, timeout: int | None = None) 
         method="POST",
     )
     max_retries = max(1, int(config.get("max_retries", 1)))
+    base_retry_sleep_seconds = max(0.0, float(config.get("retry_sleep_seconds", 0.0)))
     last_error = ""
     for attempt in range(1, max_retries + 1):
         try:
@@ -424,14 +437,21 @@ def call_llm(prompt: str, model: str | None = None, timeout: int | None = None) 
             last_error = f"HTTP {exc.code}: {body[:1000]}"
             retryable_degraded = "DEGRADED function cannot be invoked" in body
             should_retry = (exc.code in {408, 429, 500, 502, 503, 504} or retryable_degraded) and '"1113"' not in body and '"1211"' not in body
+            retry_after_seconds = _retry_after_seconds(exc.headers)
             if not should_retry or attempt == max_retries:
-                return None, {"provider": provider, "model": model, "error": last_error, "attempts": attempt}
-            time.sleep(float(config.get("retry_sleep_seconds", 0.0)) * attempt)
+                return None, {
+                    "provider": provider,
+                    "model": model,
+                    "error": last_error,
+                    "attempts": attempt,
+                    "retry_after_seconds": retry_after_seconds,
+                }
+            time.sleep(max(base_retry_sleep_seconds * attempt, retry_after_seconds))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = str(exc)
             if attempt == max_retries:
                 return None, {"provider": provider, "model": model, "error": last_error, "attempts": attempt}
-            time.sleep(float(config.get("retry_sleep_seconds", 0.0)) * attempt)
+            time.sleep(base_retry_sleep_seconds * attempt)
     else:
         return None, {"provider": provider, "model": model, "error": last_error, "attempts": max_retries}
     usage = data.get("usage", {})
