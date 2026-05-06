@@ -29,7 +29,7 @@ jobs:
       REBUILD_RANKS: "1"
       RUN_A0_A1_A5: "1"
       RUN_LLM: "1"
-      RUN_LLM_PARALLEL: "0"
+      RUN_LLM_PARALLEL: "1"
       RUN_A6: "0"
 
     steps:
