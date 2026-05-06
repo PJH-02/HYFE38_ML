@@ -1,0 +1,8 @@
+{
+  "last_completed_end_month": "2023-10",
+  "last_completed_start_month": "2023-05",
+  "months_per_run": 6,
+  "out_root": "testing/backtest_state/out_actions_flow_v2_a0_a5_k10",
+  "run_id": "25455236868",
+  "updated_at": "2026-05-06T20:38:01Z"
+}
