@@ -73,11 +73,23 @@ def read_progress(out_root: Path, strategy: str, top_k: int) -> dict:
     return progress
 
 
+def strategy_out_dir(out_root: Path, strategy: str, top_k: int) -> Path:
+    return out_root / LLM_STRATEGIES[strategy]["out_dir"].format(top_k=top_k)
+
+
 def append_progress_log(out_root: Path, row: dict) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     path = out_root / "monthly_progress.jsonl"
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+    strategy = row.get("strategy")
+    top_k = row.get("top_k")
+    if strategy in LLM_STRATEGIES and top_k is not None:
+        strategy_dir = strategy_out_dir(out_root, str(strategy), int(top_k))
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        strategy_path = strategy_dir / "monthly_progress.jsonl"
+        with strategy_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
 
 def format_metric(value: object, *, percent: bool = False) -> str:

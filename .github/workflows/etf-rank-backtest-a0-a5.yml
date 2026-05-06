@@ -3,15 +3,30 @@ name: ETF Rank Backtest A0-A5
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: etf-rank-backtest-a0-a5-state
+  cancel-in-progress: false
+
 env:
   REGIME_CSV_PATH: regime_weights.csv
-  OUT_ROOT: out_actions_flow_v2_a0_a5_k10
+  OUT_ROOT: backtest_state/out_actions_flow_v2_a0_a5_k10
+  STATE_ROOT: testing/backtest_state
   TOP_K_VALUES: "10"
+  MONTHS_PER_RUN: "6"
 
 jobs:
   prepare-ranks:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      should_run: ${{ steps.chunk.outputs.should_run }}
+      start_month: ${{ steps.chunk.outputs.start_month }}
+      end_month: ${{ steps.chunk.outputs.end_month }}
+      first_month: ${{ steps.chunk.outputs.first_month }}
+      last_month: ${{ steps.chunk.outputs.last_month }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,7 +47,26 @@ jobs:
           python -u 03_make_rotation_rank.py
           python -u 04_merge_rank_panel.py
 
+      - name: Determine next six-month chunk
+        id: chunk
+        working-directory: testing
+        run: |
+          mkdir -p backtest_state
+          python -u determine_next_backtest_chunk.py \
+            --rank-panel rank_panel.csv \
+            --state-path backtest_state/chunk_state.json \
+            --months-per-run "$MONTHS_PER_RUN" | tee chunk.env
+          cat chunk.env >> "$GITHUB_OUTPUT"
+
+      - name: Show chunk plan
+        run: |
+          echo "should_run=${{ steps.chunk.outputs.should_run }}"
+          echo "start_month=${{ steps.chunk.outputs.start_month }}"
+          echo "end_month=${{ steps.chunk.outputs.end_month }}"
+          echo "available=${{ steps.chunk.outputs.first_month }}..${{ steps.chunk.outputs.last_month }}"
+
       - name: Upload rebuilt ranks
+        if: steps.chunk.outputs.should_run == '1'
         uses: actions/upload-artifact@v4
         with:
           name: rebuilt-ranks-${{ github.run_id }}
@@ -51,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: prepare-ranks
+    if: needs.prepare-ranks.outputs.should_run == '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,15 +116,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: etf-rank-fast-backtests-${{ github.run_id }}
-          path: testing/out_actions_flow_v2_a0_a5_k10/
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/
           if-no-files-found: warn
           retention-days: 14
 
-  llm-backtests-2024:
+  llm-backtest-chunk:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     needs: prepare-ranks
-    name: LLM backtests through 2024 (${{ matrix.llm_strategy }})
+    if: needs.prepare-ranks.outputs.should_run == '1'
+    name: LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
     strategy:
       fail-fast: false
       matrix:
@@ -137,7 +173,7 @@ jobs:
           name: rebuilt-ranks-${{ github.run_id }}
           path: testing
 
-      - name: Run monthly LLM backtest
+      - name: Run six-month LLM backtest chunk
         working-directory: testing
         run: |
           python -u run_monthly_strategy_backtest.py \
@@ -145,169 +181,87 @@ jobs:
             --rank-panel rank_panel.csv \
             --out-root "$OUT_ROOT" \
             --top-k "$TOP_K_VALUES" \
-            --end-month 2024-12
+            --start-month "${{ needs.prepare-ranks.outputs.start_month }}" \
+            --end-month "${{ needs.prepare-ranks.outputs.end_month }}"
 
-      - name: Upload LLM backtest outputs through 2024
+      - name: Upload LLM state for commit
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2024-${{ github.run_id }}
-          path: testing/out_actions_flow_v2_a0_a5_k10/
+          name: etf-rank-llm-state-${{ matrix.llm_strategy }}-${{ github.run_id }}
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/${{ matrix.llm_strategy }}_k10/
           if-no-files-found: error
           retention-days: 14
 
-  llm-backtests-2025:
+  commit-backtest-state:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    needs: llm-backtests-2024
-    name: LLM backtests through 2025 (${{ matrix.llm_strategy }})
-    strategy:
-      fail-fast: false
-      matrix:
-        llm_strategy: [A2a, A2b, A3, A4]
-    env:
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_CONFIG_PATH: .no_local_llm_config.json
-      LLM_PROVIDER: nvidia
-      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
-      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
-      LLM_MODEL: z-ai/glm4.7
-      LLM_TIMEOUT_SECONDS: "180"
-      LLM_MAX_TOKENS: "2048"
-      LLM_MAX_RETRIES: "8"
-      LLM_RETRY_SLEEP_SECONDS: "20"
-      LLM_SUCCESS_SLEEP_SECONDS: "1"
-      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
-      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
-      LLM_FAIL_ON_FALLBACK: "1"
-      LLM_VALIDATION_RETRIES: "3"
-      LLM_PROGRESS_INTERVAL: "10"
+    timeout-minutes: 30
+    needs: [prepare-ranks, llm-backtest-chunk]
+    if: needs.prepare-ranks.outputs.should_run == '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          ref: ${{ github.ref_name }}
 
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip pandas numpy
+      - name: Download A2a state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A2a-${{ github.run_id }}
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A2a_k10
 
-      - name: Validate NVIDIA secret
+      - name: Download A2b state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A2b-${{ github.run_id }}
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A2b_k10
+
+      - name: Download A3 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A3-${{ github.run_id }}
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A3_k10
+
+      - name: Download A4 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A4-${{ github.run_id }}
+          path: testing/backtest_state/out_actions_flow_v2_a0_a5_k10/A4_k10
+
+      - name: Update committed chunk state
         run: |
-          if [ -z "$NVIDIA_API_KEY" ]; then
-            echo "NVIDIA_API_KEY repository secret is required."
-            exit 1
+          python - <<'PY'
+          import json
+          import os
+          import time
+          from pathlib import Path
+
+          state_dir = Path("testing/backtest_state")
+          state_dir.mkdir(parents=True, exist_ok=True)
+          state_path = state_dir / "chunk_state.json"
+          state = {
+              "last_completed_start_month": os.environ["START_MONTH"],
+              "last_completed_end_month": os.environ["END_MONTH"],
+              "months_per_run": int(os.environ["MONTHS_PER_RUN"]),
+              "out_root": "testing/backtest_state/out_actions_flow_v2_a0_a5_k10",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+        env:
+          START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
+          END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
+
+      - name: Commit backtest state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add testing/backtest_state
+          if git diff --cached --quiet; then
+            echo "No backtest state changes to commit."
+            exit 0
           fi
-
-      - name: Download rebuilt ranks
-        uses: actions/download-artifact@v4
-        with:
-          name: rebuilt-ranks-${{ github.run_id }}
-          path: testing
-
-      - name: Download 2024 LLM state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2024-${{ github.run_id }}
-          path: testing/out_actions_flow_v2_a0_a5_k10
-
-      - name: Run monthly LLM backtest
-        working-directory: testing
-        run: |
-          python -u run_monthly_strategy_backtest.py \
-            --strategy "${{ matrix.llm_strategy }}" \
-            --rank-panel rank_panel.csv \
-            --out-root "$OUT_ROOT" \
-            --top-k "$TOP_K_VALUES" \
-            --start-month 2025-01 \
-            --end-month 2025-12
-
-      - name: Upload LLM backtest outputs through 2025
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2025-${{ github.run_id }}
-          path: testing/out_actions_flow_v2_a0_a5_k10/
-          if-no-files-found: error
-          retention-days: 14
-
-  llm-backtests-2026:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    needs: llm-backtests-2025
-    name: LLM backtests through 2026 (${{ matrix.llm_strategy }})
-    strategy:
-      fail-fast: false
-      matrix:
-        llm_strategy: [A2a, A2b, A3, A4]
-    env:
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_CONFIG_PATH: .no_local_llm_config.json
-      LLM_PROVIDER: nvidia
-      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
-      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
-      LLM_MODEL: z-ai/glm4.7
-      LLM_TIMEOUT_SECONDS: "180"
-      LLM_MAX_TOKENS: "2048"
-      LLM_MAX_RETRIES: "8"
-      LLM_RETRY_SLEEP_SECONDS: "20"
-      LLM_SUCCESS_SLEEP_SECONDS: "1"
-      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
-      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
-      LLM_FAIL_ON_FALLBACK: "1"
-      LLM_VALIDATION_RETRIES: "3"
-      LLM_PROGRESS_INTERVAL: "10"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip pandas numpy
-
-      - name: Validate NVIDIA secret
-        run: |
-          if [ -z "$NVIDIA_API_KEY" ]; then
-            echo "NVIDIA_API_KEY repository secret is required."
-            exit 1
-          fi
-
-      - name: Download rebuilt ranks
-        uses: actions/download-artifact@v4
-        with:
-          name: rebuilt-ranks-${{ github.run_id }}
-          path: testing
-
-      - name: Download 2025 LLM state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2025-${{ github.run_id }}
-          path: testing/out_actions_flow_v2_a0_a5_k10
-
-      - name: Run monthly LLM backtest
-        working-directory: testing
-        run: |
-          python -u run_monthly_strategy_backtest.py \
-            --strategy "${{ matrix.llm_strategy }}" \
-            --rank-panel rank_panel.csv \
-            --out-root "$OUT_ROOT" \
-            --top-k "$TOP_K_VALUES" \
-            --start-month 2026-01 \
-            --end-month 2026-12
-
-      - name: Upload LLM backtest outputs through 2026
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2026-${{ github.run_id }}
-          path: testing/out_actions_flow_v2_a0_a5_k10/
-          if-no-files-found: error
-          retention-days: 14
+          git commit -m "ci: save llm backtest state through ${{ needs.prepare-ranks.outputs.end_month }}"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
