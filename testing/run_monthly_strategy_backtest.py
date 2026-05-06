@@ -79,6 +79,18 @@ def append_progress_log(out_root: Path, row: dict) -> None:
         handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
 
+def format_metric(value: object, *, percent: bool = False) -> str:
+    if value is None:
+        return "NA"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "NA"
+    if percent:
+        return f"{number:.2%}"
+    return f"{number:.6g}"
+
+
 def run_month(strategy: str, rank_panel: Path, out_root: Path, top_k: int, start_date: str, end_date: str, dry_run: bool) -> None:
     script = LLM_STRATEGIES[strategy]["script"]
     command = [
@@ -105,10 +117,20 @@ def run_month(strategy: str, rank_panel: Path, out_root: Path, top_k: int, start
         raise SystemExit(f"{strategy} month {start_date}..{end_date} failed with exit code {completed.returncode}")
     progress = read_progress(out_root, strategy, top_k)
     completed_decisions = progress.get("checkpoint", {}).get("completed_decisions")
-    fallback_rate = progress.get("summary", {}).get("fallback_rate")
+    summary = progress.get("summary", {})
+    final_nav = summary.get("final_nav")
+    total_return = summary.get("total_return")
+    sharpe = summary.get("sharpe")
+    max_drawdown = summary.get("max_drawdown")
+    fallback_rate = summary.get("fallback_rate")
     log(
         f"MONTH DONE strategy={strategy} top_k={top_k} start={start_date} end={end_date} "
-        f"completed_decisions={completed_decisions} fallback_rate={fallback_rate}"
+        f"completed_decisions={completed_decisions} "
+        f"nav={format_metric(final_nav)} "
+        f"return={format_metric(total_return, percent=True)} "
+        f"sharpe={format_metric(sharpe)} "
+        f"mdd={format_metric(max_drawdown, percent=True)} "
+        f"fallback_rate={format_metric(fallback_rate, percent=True)}"
     )
     append_progress_log(
         out_root,
@@ -118,6 +140,10 @@ def run_month(strategy: str, rank_panel: Path, out_root: Path, top_k: int, start
             "start_date": start_date,
             "end_date": end_date,
             "completed_decisions": completed_decisions,
+            "final_nav": final_nav,
+            "total_return": total_return,
+            "sharpe": sharpe,
+            "max_drawdown": max_drawdown,
             "fallback_rate": fallback_rate,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
