@@ -38,7 +38,7 @@ def log(message: str) -> None:
     print(f"{stamp} {message}", flush=True)
 
 
-def month_ranges(rank_panel: Path) -> list[tuple[str, str, str, int]]:
+def month_ranges(rank_panel: Path, start_month: str | None = None, end_month: str | None = None) -> list[tuple[str, str, str, int]]:
     panel = pd.read_csv(rank_panel, usecols=["date"], parse_dates=["date"])
     dates = sorted(panel["date"].dropna().drop_duplicates())
     decision_dates = dates[:-1]
@@ -56,6 +56,7 @@ def month_ranges(rank_panel: Path) -> list[tuple[str, str, str, int]]:
             len(values),
         )
         for month, values in sorted(by_month.items())
+        if (start_month is None or month >= start_month) and (end_month is None or month <= end_month)
     ]
 
 
@@ -156,21 +157,29 @@ def main() -> None:
     parser.add_argument("--rank-panel", type=Path, default=Path("rank_panel.csv"))
     parser.add_argument("--out-root", type=Path, default=Path("out_actions_flow_v2_a0_a5_k10"))
     parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--start-month", default=None, help="Optional inclusive YYYY-MM month start.")
+    parser.add_argument("--end-month", default=None, help="Optional inclusive YYYY-MM month end.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     rank_panel = args.rank_panel.resolve()
     out_root = args.out_root.resolve()
-    ranges = month_ranges(rank_panel)
+    ranges = month_ranges(rank_panel, start_month=args.start_month, end_month=args.end_month)
     if not ranges:
         raise SystemExit(f"No monthly decision ranges found in {rank_panel}")
-    log(f"MONTHLY RUN strategy={args.strategy} top_k={args.top_k} months={len(ranges)} out_root={out_root}")
+    log(
+        f"MONTHLY RUN strategy={args.strategy} top_k={args.top_k} "
+        f"start_month={args.start_month or 'FIRST'} end_month={args.end_month or 'LAST'} "
+        f"months={len(ranges)} out_root={out_root}"
+    )
     append_progress_log(
         out_root,
         {
             "strategy": args.strategy,
             "top_k": args.top_k,
             "event": "monthly_run_start",
+            "start_month": args.start_month,
+            "end_month": args.end_month,
             "months": len(ranges),
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },

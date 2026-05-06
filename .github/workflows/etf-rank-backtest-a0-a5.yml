@@ -85,10 +85,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  llm-backtests:
+  llm-backtests-2024:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     needs: prepare-ranks
+    name: LLM backtests through 2024 (${{ matrix.llm_strategy }})
     strategy:
       fail-fast: false
       matrix:
@@ -142,13 +143,168 @@ jobs:
             --strategy "${{ matrix.llm_strategy }}" \
             --rank-panel rank_panel.csv \
             --out-root "$OUT_ROOT" \
-            --top-k "$TOP_K_VALUES"
+            --top-k "$TOP_K_VALUES" \
+            --end-month 2024-12
 
-      - name: Upload LLM backtest outputs
+      - name: Upload LLM backtest outputs through 2024
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: etf-rank-llm-${{ matrix.llm_strategy }}-${{ github.run_id }}
+          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2024-${{ github.run_id }}
           path: testing/out_actions_flow_v2_a0_a5_k10/
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 14
+
+  llm-backtests-2025:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: llm-backtests-2024
+    name: LLM backtests through 2025 (${{ matrix.llm_strategy }})
+    strategy:
+      fail-fast: false
+      matrix:
+        llm_strategy: [A2a, A2b, A3, A4]
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_CONFIG_PATH: .no_local_llm_config.json
+      LLM_PROVIDER: nvidia
+      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
+      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
+      LLM_MODEL: z-ai/glm4.7
+      LLM_TIMEOUT_SECONDS: "180"
+      LLM_MAX_TOKENS: "2048"
+      LLM_MAX_RETRIES: "8"
+      LLM_RETRY_SLEEP_SECONDS: "20"
+      LLM_SUCCESS_SLEEP_SECONDS: "1"
+      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
+      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+      LLM_FAIL_ON_FALLBACK: "1"
+      LLM_PROGRESS_INTERVAL: "10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy
+
+      - name: Validate NVIDIA secret
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "NVIDIA_API_KEY repository secret is required."
+            exit 1
+          fi
+
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
+
+      - name: Download 2024 LLM state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2024-${{ github.run_id }}
+          path: testing/out_actions_flow_v2_a0_a5_k10
+
+      - name: Run monthly LLM backtest
+        working-directory: testing
+        run: |
+          python -u run_monthly_strategy_backtest.py \
+            --strategy "${{ matrix.llm_strategy }}" \
+            --rank-panel rank_panel.csv \
+            --out-root "$OUT_ROOT" \
+            --top-k "$TOP_K_VALUES" \
+            --start-month 2025-01 \
+            --end-month 2025-12
+
+      - name: Upload LLM backtest outputs through 2025
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2025-${{ github.run_id }}
+          path: testing/out_actions_flow_v2_a0_a5_k10/
+          if-no-files-found: error
+          retention-days: 14
+
+  llm-backtests-2026:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: llm-backtests-2025
+    name: LLM backtests through 2026 (${{ matrix.llm_strategy }})
+    strategy:
+      fail-fast: false
+      matrix:
+        llm_strategy: [A2a, A2b, A3, A4]
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_CONFIG_PATH: .no_local_llm_config.json
+      LLM_PROVIDER: nvidia
+      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
+      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
+      LLM_MODEL: z-ai/glm4.7
+      LLM_TIMEOUT_SECONDS: "180"
+      LLM_MAX_TOKENS: "2048"
+      LLM_MAX_RETRIES: "8"
+      LLM_RETRY_SLEEP_SECONDS: "20"
+      LLM_SUCCESS_SLEEP_SECONDS: "1"
+      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
+      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+      LLM_FAIL_ON_FALLBACK: "1"
+      LLM_PROGRESS_INTERVAL: "10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy
+
+      - name: Validate NVIDIA secret
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "NVIDIA_API_KEY repository secret is required."
+            exit 1
+          fi
+
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
+
+      - name: Download 2025 LLM state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2025-${{ github.run_id }}
+          path: testing/out_actions_flow_v2_a0_a5_k10
+
+      - name: Run monthly LLM backtest
+        working-directory: testing
+        run: |
+          python -u run_monthly_strategy_backtest.py \
+            --strategy "${{ matrix.llm_strategy }}" \
+            --rank-panel rank_panel.csv \
+            --out-root "$OUT_ROOT" \
+            --top-k "$TOP_K_VALUES" \
+            --start-month 2026-01 \
+            --end-month 2026-12
+
+      - name: Upload LLM backtest outputs through 2026
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-rank-llm-${{ matrix.llm_strategy }}-through-2026-${{ github.run_id }}
+          path: testing/out_actions_flow_v2_a0_a5_k10/
+          if-no-files-found: error
           retention-days: 14
