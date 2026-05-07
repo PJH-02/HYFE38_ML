@@ -13,6 +13,7 @@ from A2a_llm_opaque_rank_allocator import (
     DecisionResult,
     REASON_CODE_ENUM,
     apply_top_k_filter,
+    build_llm_json_retry_prompt,
     call_llm,
     classify_llm_failure,
     create_id_mapping,
@@ -116,16 +117,41 @@ def generate_A3_weight(
         return DecisionResult({}, True, {"fallback_used": True, "fallback_reason": "empty_valid_universe"})
     packet = build_policy_packet(day_df, current_weights, id_mapping, decision_step)
     prompt = build_policy_prompt(packet, load_policy_pack(), top_k=top_k)
-    response, call_meta = call_llm(prompt)
-    parsed = parse_llm_json(response)
     valid_asset_ids = {asset["asset_id"] for asset in packet["assets"]}
-    reason_ok, reason_errors = parse_and_validate_reason_codes(parsed)
-    ok, asset_weights, errors = validate_llm_sleeve_weights(parsed, valid_asset_ids, top_k, require_reason_codes=True)
-    errors = errors + ([] if reason_ok else reason_errors)
+    validation_retries = max(1, int(os.getenv("LLM_VALIDATION_RETRIES", "3")))
+    call_meta: dict[str, Any] = {}
+    errors: list[str] = []
+    asset_weights: dict[str, float] = {}
     repair_used = False
-    if (not ok or not reason_ok) and parsed is not None:
-        repaired, repair_used = repair_invalid_llm_output_once(parsed, valid_asset_ids, top_k)
-        ok, asset_weights, errors = validate_llm_sleeve_weights(repaired, valid_asset_ids, top_k)
+    validation_attempts: list[dict[str, Any]] = []
+    ok = False
+    attempt_prompt = prompt
+    for validation_attempt in range(1, validation_retries + 1):
+        response, call_meta = call_llm(attempt_prompt)
+        parsed = parse_llm_json(response)
+        reason_ok, reason_errors = parse_and_validate_reason_codes(parsed)
+        ok, asset_weights, errors = validate_llm_sleeve_weights(parsed, valid_asset_ids, top_k, require_reason_codes=True)
+        errors = errors + ([] if reason_ok else reason_errors)
+        repair_used = False
+        if (not ok or not reason_ok) and parsed is not None:
+            repaired, repair_used = repair_invalid_llm_output_once(parsed, valid_asset_ids, top_k)
+            ok, asset_weights, errors = validate_llm_sleeve_weights(repaired, valid_asset_ids, top_k)
+        validation_attempts.append(
+            {
+                "validation_attempt": validation_attempt,
+                "ok": ok,
+                "errors": errors,
+                "repair_used": repair_used,
+                "prompt_tokens": call_meta.get("prompt_tokens", 0),
+                "response_tokens": call_meta.get("response_tokens", 0),
+                "error": call_meta.get("error", ""),
+            }
+        )
+        if ok:
+            break
+        if call_meta.get("error"):
+            break
+        attempt_prompt = build_llm_json_retry_prompt(prompt, errors, response, require_reason_codes=True)
     if not ok:
         return DecisionResult(
             base_weights,
@@ -134,6 +160,8 @@ def generate_A3_weight(
                 "fallback_used": True,
                 "fallback_reason": classify_llm_failure(call_meta, errors),
                 "validation_errors": errors,
+                "validation_attempts": validation_attempts,
+                "validation_retry_limit": validation_retries,
                 "repair_used": repair_used,
                 "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 **call_meta,
@@ -147,6 +175,8 @@ def generate_A3_weight(
         {
             "fallback_used": False,
             "repair_used": repair_used,
+            "validation_attempts": validation_attempts,
+            "validation_retry_limit": validation_retries,
             "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             **call_meta,
         },

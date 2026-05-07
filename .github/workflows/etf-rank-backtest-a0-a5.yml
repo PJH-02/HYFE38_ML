@@ -118,7 +118,7 @@ jobs:
       LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
       LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
       LLM_FAIL_ON_FALLBACK: "1"
-      LLM_VALIDATION_RETRIES: "3"
+      LLM_VALIDATION_RETRIES: "6"
       LLM_PROGRESS_INTERVAL: "10"
     steps:
       - name: Checkout

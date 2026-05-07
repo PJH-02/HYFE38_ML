@@ -492,6 +492,30 @@ def classify_llm_failure(call_meta: dict[str, Any], validation_errors: list[str]
 
 def _normalize_llm_json(parsed: Any) -> dict[str, Any] | None:
     if isinstance(parsed, dict):
+        if "target_weights" in parsed:
+            return parsed
+        answer = parsed.get("answer")
+        if isinstance(answer, list):
+            normalized = dict(parsed)
+            normalized["target_weights"] = answer
+            return normalized
+        if isinstance(answer, dict):
+            nested = _normalize_llm_json(answer)
+            if nested is not None:
+                normalized = dict(parsed)
+                normalized.update(nested)
+                normalized.pop("answer", None)
+                return normalized
+        if isinstance(answer, str):
+            try:
+                nested = _normalize_llm_json(json.loads(answer))
+            except json.JSONDecodeError:
+                nested = None
+            if nested is not None:
+                normalized = dict(parsed)
+                normalized.update(nested)
+                normalized.pop("answer", None)
+                return normalized
         return parsed
     if isinstance(parsed, list):
         return {"target_weights": parsed}
@@ -606,6 +630,45 @@ def repair_invalid_llm_output_once(
     return repaired, True
 
 
+def build_llm_json_retry_prompt(
+    original_prompt: str,
+    validation_errors: list[str],
+    previous_response: str | None,
+    *,
+    require_reason_codes: bool = False,
+) -> str:
+    schema = {
+        "target_weights": [
+            {
+                "asset_id": "asset_001",
+                "sleeve_weight": 0.1,
+            }
+        ]
+    }
+    if require_reason_codes:
+        schema["target_weights"][0]["reason_codes"] = ["rank_alignment_strong"]
+        schema["portfolio_reason_codes"] = ["diversified"]
+    try:
+        original_payload: Any = json.loads(original_prompt)
+    except json.JSONDecodeError:
+        original_payload = original_prompt
+    retry_payload = {
+        "instructions": [
+            "The previous response failed validation.",
+            "Return one valid JSON object only. Do not include markdown, code fences, prose, or commentary.",
+            "Use only asset_id values present in the original prompt.",
+            "sleeve_weight values must be numeric, non-negative, and sum to 1.0.",
+            "Respect the max_nonzero_weights constraint in the original prompt.",
+            "Do not change the decision method; only correct the response format and schema.",
+        ],
+        "validation_errors": validation_errors,
+        "required_schema_example": schema,
+        "previous_response_excerpt": (previous_response or "")[:4000],
+        "original_prompt": original_payload,
+    }
+    return json.dumps(retry_payload, ensure_ascii=True, separators=(",", ":"))
+
+
 def map_asset_id_to_ticker(weights: dict[str, float], id_mapping: pd.DataFrame) -> dict[str, float]:
     asset_to_ticker = dict(zip(id_mapping["asset_id"].astype(str), id_mapping["ticker"].astype(str)))
     return {asset_to_ticker[asset_id]: weight for asset_id, weight in weights.items() if asset_id in asset_to_ticker}
@@ -634,8 +697,9 @@ def generate_A2a_weight(
     repair_used = False
     validation_attempts: list[dict[str, Any]] = []
     ok = False
+    attempt_prompt = prompt
     for validation_attempt in range(1, validation_retries + 1):
-        response, call_meta = call_llm(prompt)
+        response, call_meta = call_llm(attempt_prompt)
         parsed = parse_llm_json(response)
         ok, asset_weights, errors = validate_llm_sleeve_weights(parsed, valid_asset_ids, top_k)
         repair_used = False
@@ -657,6 +721,7 @@ def generate_A2a_weight(
             break
         if call_meta.get("error"):
             break
+        attempt_prompt = build_llm_json_retry_prompt(prompt, errors, response)
     if not ok:
         return DecisionResult(
             base_weights,
