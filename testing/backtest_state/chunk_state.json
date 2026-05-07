@@ -1,8 +1,8 @@
 {
-  "last_completed_end_month": "2025-04",
-  "last_completed_start_month": "2024-11",
+  "last_completed_end_month": "2025-10",
+  "last_completed_start_month": "2025-05",
   "months_per_run": 6,
   "out_root": "testing/backtest_state/out_actions_flow_v2_a0_a5_k10",
-  "run_id": "25494320934",
-  "updated_at": "2026-05-07T12:01:14Z"
+  "run_id": "25494502440",
+  "updated_at": "2026-05-07T14:06:03Z"
 }
