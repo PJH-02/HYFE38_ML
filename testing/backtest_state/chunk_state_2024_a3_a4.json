@@ -1,11 +1,11 @@
 {
   "end_decision_date": "2026-05-07",
-  "last_completed_end_month": "2025-06",
-  "last_completed_start_month": "2025-01",
+  "last_completed_end_month": "2025-12",
+  "last_completed_start_month": "2025-07",
   "months_per_run": 6,
   "out_root": "testing/backtest_state/out_2024_kofr_a0_a6_k10",
   "phase": "primary_a3_a4",
-  "run_id": "25562415380",
+  "run_id": "25572917427",
   "start_decision_date": "2024-01-05",
-  "updated_at": "2026-05-08T18:37:45Z"
+  "updated_at": "2026-05-08T20:45:30Z"
 }
