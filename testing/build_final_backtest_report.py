@@ -11,10 +11,12 @@ import pandas as pd
 MODEL_DIRS = {
     "A0": "A0",
     "A1": "A1_k10",
+    "A2a": "A2a_k10",
     "A2b": "A2b_k10",
     "A3": "A3_k10",
     "A4": "A4_k10",
     "A5": "A5_k10",
+    "A6": "A6",
 }
 BENCHMARK_LABEL = "KOSPI_BUY_HOLD"
 

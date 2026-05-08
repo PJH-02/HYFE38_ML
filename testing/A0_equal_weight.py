@@ -26,6 +26,7 @@ class BacktestConfig:
     initial_nav: float = INITIAL_NAV
     commission_rate: float = COMMISSION_RATE
     stock_ratio: float = STOCK_RATIO
+    cash_return: float = 0.0
     fixed_point_tol: float = 1e-10
     fixed_point_max_iter: int = 50
 
@@ -44,6 +45,39 @@ def default_regime_path() -> Path | None:
         return Path(env_path)
     candidate = Path(__file__).resolve().parent / "regime_weights.csv"
     return candidate if candidate.exists() else None
+
+
+def default_kofr_path() -> Path | None:
+    env_path = os.getenv("KOFR_XLSX_PATH")
+    if env_path:
+        return Path(env_path)
+    candidate = Path(__file__).resolve().parent.parent / "KOFR_20260508.xlsx"
+    return candidate if candidate.exists() else None
+
+
+def load_kofr_table(path: Path | None) -> pd.DataFrame | None:
+    if path is None or not path.exists():
+        return None
+    kofr = pd.read_excel(
+        path,
+        skiprows=4,
+        names=["date", "kofr", "avg30", "avg90", "avg180", "kofr_index"],
+    )
+    kofr["date"] = pd.to_datetime(kofr["date"], format="%Y.%m.%d", errors="coerce")
+    kofr["kofr"] = pd.to_numeric(kofr["kofr"], errors="coerce")
+    kofr = kofr.dropna(subset=["date", "kofr"]).sort_values("date")
+    if kofr.empty:
+        raise ValueError("KOFR file has no valid daily KOFR rows")
+    return kofr[["date", "kofr"]]
+
+
+def kofr_cash_return_for_date(kofr: pd.DataFrame | None, date: pd.Timestamp, default: float = 0.0) -> float:
+    if kofr is None:
+        return float(default)
+    eligible = kofr.loc[kofr["date"] <= pd.Timestamp(date)]
+    if eligible.empty:
+        return float(default)
+    return float(eligible.iloc[-1]["kofr"]) / 100.0 / 252.0
 
 
 def load_regime_table(path: Path | None) -> pd.DataFrame | None:
@@ -406,7 +440,8 @@ def rebalance_and_mark_to_market_next_day(
 
     turnover_value = float((target_values - old_value_open).abs().sum())
     new_qty = target_qty
-    cash_close = nav_open_post - float(target_values.sum())
+    cash_open_post = nav_open_post - float(target_values.sum())
+    cash_close = cash_open_post * (1.0 + config.cash_return)
     nav_close = cash_close + float((new_qty * close_prices).sum())
     open_to_close_pnl = nav_close - nav_open_post
 
@@ -426,6 +461,7 @@ def rebalance_and_mark_to_market_next_day(
         "turnover_ratio": turnover_value / nav_open_pre if nav_open_pre else 0.0,
         "daily_return": nav_close / prev_nav_close - 1.0 if prev_nav_close else 0.0,
         "stock_ratio": config.stock_ratio,
+        "cash_return": config.cash_return,
         "effective_num_positions": int((target_weights > 0).sum()),
     }
     return new_state, result
@@ -441,18 +477,29 @@ def run_backtest(
     out_dir: Path,
     panel_path: Path | None = None,
     extra_summary: dict | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     dates = list(panel["date"].drop_duplicates().sort_values())
     regime_path = default_regime_path()
     regime = load_regime_table(regime_path)
+    kofr_path = default_kofr_path()
+    kofr = load_kofr_table(kofr_path)
     state = {"cash": config.initial_nav, "qty": pd.Series(dtype=float), "nav_close": config.initial_nav}
     daily_rows: list[dict] = []
     weight_rows: list[dict] = []
     trade_rows: list[dict] = []
     log_rows: list[dict] = []
+    start_ts = pd.Timestamp(start_date) if start_date else None
+    end_ts = pd.Timestamp(end_date) if end_date else None
 
     for idx, decision_date in enumerate(dates[:-1]):
+        decision_ts = pd.Timestamp(decision_date)
+        if start_ts is not None and decision_ts < start_ts:
+            continue
+        if end_ts is not None and decision_ts > end_ts:
+            continue
         execution_date = dates[idx + 1]
         regime_info = regime_info_for_date(regime, execution_date)
         day_df = apply_regime_market_score(panel.loc[panel["date"] == decision_date], regime_info)
@@ -462,7 +509,8 @@ def run_backtest(
         target_weights, fallback_used = weight_generator(day_df)
         target_weights = target_weights[target_weights > 0]
         execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, config.stock_ratio)
-        execution_config = replace(config, stock_ratio=execution_stock_ratio)
+        execution_cash_return = kofr_cash_return_for_date(kofr, execution_date)
+        execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         old_qty = state["qty"].copy()
         state, result = rebalance_and_mark_to_market_next_day(state, target_weights, price_t1, execution_config)
         trade_rows.extend(
@@ -524,7 +572,11 @@ def run_backtest(
             "stock_ratio": config.stock_ratio,
             "stock_ratio_mode": "regime" if regime is not None else "constant",
             "regime_path": str(regime_path) if regime_path else None,
+            "cash_return_mode": "kofr_1_trading_day" if kofr is not None else "zero",
+            "kofr_path": str(kofr_path) if kofr_path else None,
             "rank_panel_hash": file_sha256(panel_path) if panel_path else None,
+            "start_date": start_date,
+            "end_date": end_date,
         }
     )
     if extra_summary:
@@ -617,7 +669,12 @@ def _json_ready(value):
     return value
 
 
-def run_A0_backtest(panel_path: Path | None = None, out_root: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def run_A0_backtest(
+    panel_path: Path | None = None,
+    out_root: Path | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     panel_path = panel_path or default_panel_path()
     out_root = out_root or default_out_root()
     panel = load_rank_panel(panel_path)
@@ -628,6 +685,8 @@ def run_A0_backtest(panel_path: Path | None = None, out_root: Path | None = None
         config=BacktestConfig(strategy="A0_EQUAL_WEIGHT"),
         out_dir=out_root / "A0",
         panel_path=panel_path,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
@@ -635,8 +694,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run A0 equal-weight ETF baseline backtest.")
     parser.add_argument("--panel", type=Path, default=default_panel_path())
     parser.add_argument("--out-root", type=Path, default=default_out_root())
+    parser.add_argument("--start-date", default=None)
+    parser.add_argument("--end-date", default=None)
     args = parser.parse_args()
-    run_A0_backtest(args.panel, args.out_root)
+    run_A0_backtest(args.panel, args.out_root, args.start_date, args.end_date)
 
 
 if __name__ == "__main__":

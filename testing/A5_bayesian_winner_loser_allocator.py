@@ -168,6 +168,8 @@ def run_A5_backtest(
     panel_path: Path | None = None,
     out_root: Path | None = None,
     top_k_values: tuple[int, ...] = TOP_K_GRID,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[int, tuple[pd.DataFrame, pd.DataFrame, dict]]:
     panel_path = panel_path or default_panel_path()
     out_root = out_root or default_out_root()
@@ -199,6 +201,8 @@ def run_A5_backtest(
                 "shrink_k": SHRINK_K,
                 "label": "ETF next close-to-close return > index next close-to-close return",
             },
+            start_date=start_date,
+            end_date=end_date,
         )
         posterior_states = pd.concat(posterior_rows, ignore_index=True) if posterior_rows else pd.DataFrame()
         posterior_states.to_csv(out_dir / "posterior_states.csv", index=False)
@@ -214,8 +218,10 @@ def main() -> None:
     parser.add_argument("--panel", type=Path, default=default_panel_path())
     parser.add_argument("--out-root", type=Path, default=default_out_root())
     parser.add_argument("--top-k", type=_parse_top_k, default=TOP_K_GRID, help="Comma-separated grid, default 3,5,7,10.")
+    parser.add_argument("--start-date", default=None)
+    parser.add_argument("--end-date", default=None)
     args = parser.parse_args()
-    run_A5_backtest(args.panel, args.out_root, args.top_k)
+    run_A5_backtest(args.panel, args.out_root, args.top_k, args.start_date, args.end_date)
 
 
 if __name__ == "__main__":

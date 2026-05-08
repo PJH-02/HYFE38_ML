@@ -30,7 +30,7 @@ DERIVED_FLOW_ACTOR_COLUMNS = ["total_net_buy"]
 FLOW_ACTOR_COLUMNS = DERIVED_FLOW_ACTOR_COLUMNS + BASE_FLOW_ACTOR_COLUMNS
 PRICE_COLUMNS = ["date", "ticker", "name", "gics_sector", "open", "close", "volume", "amount"]
 EPS = 1.0e-12
-ACTOR_SELECTION_MODES = {"dynamic", "team_static"}
+ACTOR_SELECTION_MODES = {"dynamic", "team_static", "rolling_corr_spread"}
 
 TEAM_STATIC_FLOW_DIRECTIONS = {
     "Energy": {
@@ -223,6 +223,66 @@ def shrink_predictive_corr(df: pd.DataFrame, actor_cols: list[str], shrink_k: fl
     return out
 
 
+def _rolling_quantile_spread_for_group(
+    z: pd.Series,
+    future_ret: pd.Series,
+    lookback: int,
+    min_obs: int,
+    quantile: float,
+) -> pd.Series:
+    z_values = z.to_numpy(dtype=float)
+    ret_values = future_ret.to_numpy(dtype=float)
+    spreads = np.full(len(z_values), np.nan, dtype=float)
+    quantile = min(max(float(quantile), 0.01), 0.49)
+    for idx in range(len(z_values)):
+        start = max(0, idx - lookback)
+        end = idx
+        if end <= start:
+            continue
+        win_z = z_values[start:end]
+        win_ret = ret_values[start:end]
+        valid = np.isfinite(win_z) & np.isfinite(win_ret)
+        if valid.sum() < min_obs:
+            continue
+        valid_z = win_z[valid]
+        valid_ret = win_ret[valid]
+        low_cut = np.nanquantile(valid_z, quantile)
+        high_cut = np.nanquantile(valid_z, 1.0 - quantile)
+        low_ret = valid_ret[valid_z <= low_cut]
+        high_ret = valid_ret[valid_z >= high_cut]
+        if len(low_ret) == 0 or len(high_ret) == 0:
+            continue
+        spreads[idx] = float(np.nanmean(high_ret) - np.nanmean(low_ret))
+    return pd.Series(spreads, index=z.index)
+
+
+def compute_rolling_quantile_spread(
+    df: pd.DataFrame,
+    actor_cols: list[str],
+    lookback: int,
+    min_obs: int,
+    quantile: float,
+) -> pd.DataFrame:
+    out = df.copy()
+    for actor in actor_cols:
+        z_col = f"{actor}_flow_z"
+        spread_col = f"{actor}_qspread"
+        out[spread_col] = (
+            out.groupby("ticker", group_keys=False, sort=False)
+            .apply(
+                lambda g: _rolling_quantile_spread_for_group(
+                    g[z_col],
+                    g["next_oc_ret"],
+                    lookback=lookback,
+                    min_obs=min_obs,
+                    quantile=quantile,
+                )
+            )
+            .reset_index(level=0, drop=True)
+        )
+    return out
+
+
 def select_predictive_actors(
     df: pd.DataFrame, actor_cols: list[str], corr_threshold: float
 ) -> pd.DataFrame:
@@ -234,6 +294,26 @@ def select_predictive_actors(
         corr = out[shrunk_col].astype(float).replace([np.inf, -np.inf], np.nan)
         out[selected_col] = corr.abs() >= corr_threshold
         out[direction_col] = np.sign(corr).where(out[selected_col], 0.0)
+    return out
+
+
+def select_corr_spread_actors(
+    df: pd.DataFrame,
+    actor_cols: list[str],
+    corr_threshold: float,
+    spread_threshold: float,
+) -> pd.DataFrame:
+    out = df.copy()
+    for actor in actor_cols:
+        corr_col = f"{actor}_predictive_corr_shrunk"
+        spread_col = f"{actor}_qspread"
+        selected_col = f"{actor}_selected"
+        direction_col = f"{actor}_direction"
+        corr = out[corr_col].astype(float).replace([np.inf, -np.inf], np.nan)
+        spread = out[spread_col].astype(float).replace([np.inf, -np.inf], np.nan)
+        direction = np.sign(corr)
+        out[selected_col] = (corr.abs() >= corr_threshold) & ((direction * spread) >= spread_threshold)
+        out[direction_col] = direction.where(out[selected_col], 0.0)
     return out
 
 
@@ -332,6 +412,7 @@ def output_columns(actor_cols: list[str]) -> list[str]:
                 f"{actor}_predictive_corr",
                 f"{actor}_predictive_corr_shrunk",
                 f"{actor}_predictive_obs",
+                f"{actor}_qspread",
                 f"{actor}_selected",
                 f"{actor}_direction",
             ]
@@ -345,6 +426,8 @@ def save_flow_rank(
     actor_cols: list[str],
     corr_threshold: float,
     actor_selection_mode: str,
+    spread_threshold: float,
+    spread_quantile: float,
 ) -> None:
     out = df[output_columns(actor_cols)].copy()
     validate_no_lookahead_flow(out)
@@ -359,6 +442,8 @@ def save_flow_rank(
     meta = {
         "score_formula": "mean(actor_direction * actor_flow_z) over selected actors",
         "corr_threshold": corr_threshold,
+        "spread_threshold": spread_threshold if actor_selection_mode == "rolling_corr_spread" else None,
+        "spread_quantile": spread_quantile if actor_selection_mode == "rolling_corr_spread" else None,
         "actor_selection_mode": actor_selection_mode,
         "team_static_includes_weak_directional_classes": actor_selection_mode == "team_static",
         "team_static_flow_directions": TEAM_STATIC_FLOW_DIRECTIONS if actor_selection_mode == "team_static" else None,
@@ -375,12 +460,21 @@ def build_flow_rank(
     lookback: int = 20,
     min_obs: int = 20,
     shrink_k: float = 20.0,
-    corr_threshold: float = 0.10,
+    corr_threshold: float | None = None,
     actor_selection_mode: str | None = None,
+    spread_threshold: float | None = None,
+    spread_quantile: float | None = None,
 ) -> pd.DataFrame:
     mode = actor_selection_mode or os.getenv("FLOW_ACTOR_SELECTION_MODE", "dynamic")
     if mode not in ACTOR_SELECTION_MODES:
         raise ValueError(f"actor_selection_mode must be one of {sorted(ACTOR_SELECTION_MODES)}, got {mode}")
+    threshold = float(corr_threshold if corr_threshold is not None else os.getenv("FLOW_CORR_THRESHOLD", "0.10"))
+    qspread_threshold = float(
+        spread_threshold if spread_threshold is not None else os.getenv("FLOW_QSPREAD_THRESHOLD", "0.005")
+    )
+    qspread_quantile = float(
+        spread_quantile if spread_quantile is not None else os.getenv("FLOW_QSPREAD_QUANTILE", "0.20")
+    )
     _, _, df = load_price_and_flow(price_path, flow_path)
     df = compute_internal_next_open_to_close_label(df)
     df = normalize_actor_flows(df, FLOW_ACTOR_COLUMNS)
@@ -388,13 +482,39 @@ def build_flow_rank(
     df = compute_rolling_flow_zscore(df, FLOW_ACTOR_COLUMNS, lookback=lookback, min_obs=min_obs)
     df = compute_predictive_actor_corr(df, FLOW_ACTOR_COLUMNS, lookback=lookback, min_obs=min_obs)
     df = shrink_predictive_corr(df, FLOW_ACTOR_COLUMNS, shrink_k=shrink_k)
+    if mode == "rolling_corr_spread":
+        df = compute_rolling_quantile_spread(
+            df,
+            FLOW_ACTOR_COLUMNS,
+            lookback=lookback,
+            min_obs=min_obs,
+            quantile=qspread_quantile,
+        )
+    else:
+        for actor in FLOW_ACTOR_COLUMNS:
+            df[f"{actor}_qspread"] = np.nan
     if mode == "team_static":
         df = select_team_static_actors(df, FLOW_ACTOR_COLUMNS)
+    elif mode == "rolling_corr_spread":
+        df = select_corr_spread_actors(
+            df,
+            FLOW_ACTOR_COLUMNS,
+            corr_threshold=threshold,
+            spread_threshold=qspread_threshold,
+        )
     else:
-        df = select_predictive_actors(df, FLOW_ACTOR_COLUMNS, corr_threshold=corr_threshold)
+        df = select_predictive_actors(df, FLOW_ACTOR_COLUMNS, corr_threshold=threshold)
     df = compute_flow_score(df, FLOW_ACTOR_COLUMNS)
     df = make_flow_rank(df, lookback=lookback, min_obs=min_obs, actor_cols=FLOW_ACTOR_COLUMNS)
-    save_flow_rank(df, output_path, FLOW_ACTOR_COLUMNS, corr_threshold=corr_threshold, actor_selection_mode=mode)
+    save_flow_rank(
+        df,
+        output_path,
+        FLOW_ACTOR_COLUMNS,
+        corr_threshold=threshold,
+        actor_selection_mode=mode,
+        spread_threshold=qspread_threshold,
+        spread_quantile=qspread_quantile,
+    )
     return df
 
 
@@ -407,8 +527,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lookback", type=int, default=20)
     parser.add_argument("--min-obs", type=int, default=20)
     parser.add_argument("--shrink-k", type=float, default=20.0)
-    parser.add_argument("--corr-threshold", type=float, default=0.10)
+    parser.add_argument("--corr-threshold", type=float, default=None)
     parser.add_argument("--actor-selection-mode", choices=sorted(ACTOR_SELECTION_MODES), default=None)
+    parser.add_argument("--spread-threshold", type=float, default=None)
+    parser.add_argument("--spread-quantile", type=float, default=None)
     return parser.parse_args()
 
 
@@ -423,6 +545,8 @@ def main() -> None:
         shrink_k=args.shrink_k,
         corr_threshold=args.corr_threshold,
         actor_selection_mode=args.actor_selection_mode,
+        spread_threshold=args.spread_threshold,
+        spread_quantile=args.spread_quantile,
     )
     print(f"Wrote {args.output}")
 

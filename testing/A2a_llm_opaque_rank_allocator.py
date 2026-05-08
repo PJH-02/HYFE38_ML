@@ -19,7 +19,10 @@ try:
     from A0_equal_weight import (
         apply_regime_market_score,
         build_trade_rows,
+        default_kofr_path,
         default_regime_path,
+        kofr_cash_return_for_date,
+        load_kofr_table,
         load_regime_table,
         regime_info_for_date,
         regime_stock_ratio_for_date,
@@ -28,7 +31,10 @@ except ModuleNotFoundError:
     from .A0_equal_weight import (
         apply_regime_market_score,
         build_trade_rows,
+        default_kofr_path,
         default_regime_path,
+        kofr_cash_return_for_date,
+        load_kofr_table,
         load_regime_table,
         regime_info_for_date,
         regime_stock_ratio_for_date,
@@ -55,6 +61,7 @@ DAILY_RESULT_COLUMNS = [
     "turnover_ratio",
     "daily_return",
     "stock_ratio",
+    "cash_return",
     "fallback_used",
     "effective_num_positions",
 ]
@@ -775,6 +782,7 @@ def rebalance_and_mark_to_market_next_day(
     price_t: pd.DataFrame,
     price_t1: pd.DataFrame,
     stock_ratio: float = STOCK_RATIO,
+    cash_return: float = 0.0,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     open_next = dict(zip(price_t1["ticker"].astype(str), price_t1["open"].astype(float)))
     close_next = dict(zip(price_t1["ticker"].astype(str), price_t1["close"].astype(float)))
@@ -811,7 +819,8 @@ def rebalance_and_mark_to_market_next_day(
         if ticker in open_next and open_next[ticker] > 0.0 and value > 0.0
     }
     target_values = {ticker: qty * open_next[ticker] for ticker, qty in new_quantities.items()}
-    cash_post = nav_open_post - sum(target_values.values())
+    cash_open_post = nav_open_post - sum(target_values.values())
+    cash_post = cash_open_post * (1.0 + cash_return)
     nav_close = cash_post + sum(qty * close_next.get(ticker, 0.0) for ticker, qty in new_quantities.items())
     turnover_value = sum(abs(target_values.get(ticker, 0.0) - old_values.get(ticker, 0.0)) for ticker in set(target_values) | set(old_values))
     new_state = {"nav": nav_close, "cash": cash_post, "quantities": new_quantities}
@@ -825,6 +834,7 @@ def rebalance_and_mark_to_market_next_day(
         "turnover_value": turnover_value,
         "turnover_ratio": turnover_value / nav_open_pre if nav_open_pre > 0.0 else 0.0,
         "daily_return": nav_close / nav_prev - 1.0 if nav_prev > 0.0 else 0.0,
+        "cash_return": cash_return,
     }
     return new_state, result
 
@@ -880,6 +890,8 @@ def run_llm_backtest(
     end_ts = pd.Timestamp(end_date) if end_date else None
     regime_path = default_regime_path()
     regime = load_regime_table(regime_path)
+    kofr_path = default_kofr_path()
+    kofr = load_kofr_table(kofr_path)
     daily_path = out_path / "daily_results.csv"
     weights_path = out_path / "weights.csv"
     trade_path = out_path / "trade_history.csv"
@@ -967,8 +979,11 @@ def run_llm_backtest(
             )
         fallback_count += int(decision.fallback_used)
         execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, STOCK_RATIO)
+        execution_cash_return = kofr_cash_return_for_date(kofr, execution_date)
         old_quantities = {str(k): float(v) for k, v in state.get("quantities", {}).items()}
-        state, result = rebalance_and_mark_to_market_next_day(state, target_weights, day_df, next_df, execution_stock_ratio)
+        state, result = rebalance_and_mark_to_market_next_day(
+            state, target_weights, day_df, next_df, execution_stock_ratio, execution_cash_return
+        )
         trade_rows.extend(
             build_trade_rows(
                 strategy=strategy,
@@ -1036,6 +1051,8 @@ def run_llm_backtest(
         "stock_ratio": STOCK_RATIO,
         "stock_ratio_mode": "regime" if regime is not None else "constant",
         "regime_path": str(regime_path) if regime_path else None,
+        "cash_return_mode": "kofr_1_trading_day" if kofr is not None else "zero",
+        "kofr_path": str(kofr_path) if kofr_path else None,
         "initial_nav": INITIAL_NAV,
         **compute_performance_metrics(daily_df, fallback_count),
     }

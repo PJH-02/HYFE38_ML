@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -22,18 +22,34 @@ import pandas as pd
 
 try:
     from A0_equal_weight import (  # type: ignore
+        build_trade_rows as _a0_build_trade_rows,
         compute_performance_metrics as _a0_compute_performance_metrics,
+        default_kofr_path as _a0_default_kofr_path,
+        default_regime_path as _a0_default_regime_path,
         get_valid_universe as _a0_get_valid_universe,
+        kofr_cash_return_for_date as _a0_kofr_cash_return_for_date,
+        load_kofr_table as _a0_load_kofr_table,
+        load_regime_table as _a0_load_regime_table,
         load_rank_panel as _a0_load_rank_panel,
         normalize_sleeve_weights as _a0_normalize_sleeve_weights,
+        regime_info_for_date as _a0_regime_info_for_date,
+        regime_stock_ratio_for_date as _a0_regime_stock_ratio_for_date,
         rebalance_and_mark_to_market_next_day as _a0_rebalance_next_day,
         validate_backtest_panel as _a0_validate_backtest_panel,
     )
 except Exception:  # pragma: no cover - optional project module
+    _a0_build_trade_rows = None
     _a0_compute_performance_metrics = None
+    _a0_default_kofr_path = None
+    _a0_default_regime_path = None
     _a0_get_valid_universe = None
+    _a0_kofr_cash_return_for_date = None
+    _a0_load_kofr_table = None
+    _a0_load_regime_table = None
     _a0_load_rank_panel = None
     _a0_normalize_sleeve_weights = None
+    _a0_regime_info_for_date = None
+    _a0_regime_stock_ratio_for_date = None
     _a0_rebalance_next_day = None
     _a0_validate_backtest_panel = None
 
@@ -99,6 +115,7 @@ class BacktestConfig:
     initial_nav: float = INITIAL_NAV
     commission_rate: float = COMMISSION_RATE
     stock_ratio: float = STOCK_RATIO
+    cash_return: float = 0.0
     commission_fixed_point_tol: float = 1e-10
     commission_fixed_point_max_iter: int = 50
 
@@ -418,6 +435,46 @@ def initialize_shadow_expert_states(expert_names: Sequence[str], initial_nav: fl
     return {name: initialize_portfolio_state(initial_nav) for name in expert_names}
 
 
+def default_regime_path() -> Optional[Path]:
+    if _a0_default_regime_path is None:
+        return None
+    return _a0_default_regime_path()
+
+
+def load_regime_table(path: Optional[Path]) -> Optional[pd.DataFrame]:
+    if _a0_load_regime_table is None:
+        return None
+    return _a0_load_regime_table(path)
+
+
+def default_kofr_path() -> Optional[Path]:
+    if _a0_default_kofr_path is None:
+        return None
+    return _a0_default_kofr_path()
+
+
+def load_kofr_table(path: Optional[Path]) -> Optional[pd.DataFrame]:
+    if _a0_load_kofr_table is None:
+        return None
+    return _a0_load_kofr_table(path)
+
+
+def regime_stock_ratio_for_date(regime: Optional[pd.DataFrame], date: pd.Timestamp, default: float) -> float:
+    if _a0_regime_stock_ratio_for_date is None:
+        return float(default)
+    return float(_a0_regime_stock_ratio_for_date(regime, date, default))
+
+
+def kofr_cash_return_for_date(kofr: Optional[pd.DataFrame], date: pd.Timestamp, default: float = 0.0) -> float:
+    if _a0_kofr_cash_return_for_date is None:
+        return float(default)
+    return float(_a0_kofr_cash_return_for_date(kofr, date, default))
+
+
+def _display_path(path: Optional[Path]) -> Optional[str]:
+    return path.name if path else None
+
+
 def _price_map(day_df: pd.DataFrame, field: str) -> Dict[str, float]:
     return dict(zip(day_df["ticker"].astype(str), day_df[field].astype(float)))
 
@@ -433,12 +490,6 @@ def rebalance_and_mark_to_market_next_day(
     price_t1: pd.DataFrame,
     config: BacktestConfig,
 ) -> Tuple[PortfolioState, Dict[str, float]]:
-    if _a0_rebalance_next_day is not None:
-        try:
-            return _a0_rebalance_next_day(state, target_sleeve_weights, price_t, price_t1, config)
-        except Exception:
-            pass
-
     close_t = _price_map(price_t, "close")
     open_t1 = _price_map(price_t1, "open")
     close_t1 = _price_map(price_t1, "close")
@@ -449,15 +500,28 @@ def rebalance_and_mark_to_market_next_day(
     nav_open_pre = state.cash + old_open_value
     old_values_open = {ticker: qty * open_t1.get(ticker, 0.0) for ticker, qty in state.quantities.items()}
 
+    weight_sum = sum(max(0.0, float(weight)) for weight in target_sleeve_weights.values())
+    normalized_weights = {
+        str(ticker): max(0.0, float(weight)) / weight_sum
+        for ticker, weight in target_sleeve_weights.items()
+        if weight_sum > EPS
+    }
     nav_open_post = nav_open_pre
     commission = 0.0
     target_values: Dict[str, float] = {}
+    target_quantities: Dict[str, float] = {}
     for _ in range(config.commission_fixed_point_max_iter):
-        target_values = {
-            ticker: config.stock_ratio * nav_open_post * max(0.0, float(weight))
-            for ticker, weight in target_sleeve_weights.items()
-            if ticker in open_t1 and open_t1[ticker] > 0
-        }
+        target_quantities = {}
+        target_values = {}
+        for ticker, weight in normalized_weights.items():
+            if ticker not in open_t1 or open_t1[ticker] <= 0:
+                continue
+            target_budget = config.stock_ratio * nav_open_post * weight
+            qty = math.floor(target_budget / open_t1[ticker]) if target_budget > 0 else 0
+            if qty <= 0:
+                continue
+            target_quantities[ticker] = float(qty)
+            target_values[ticker] = float(qty) * open_t1[ticker]
         all_tickers = set(target_values).union(old_values_open)
         turnover_value = sum(abs(target_values.get(ticker, 0.0) - old_values_open.get(ticker, 0.0)) for ticker in all_tickers)
         next_commission = config.commission_rate * turnover_value
@@ -469,12 +533,9 @@ def rebalance_and_mark_to_market_next_day(
         commission = next_commission
         nav_open_post = next_nav_open_post
 
-    quantities = {
-        ticker: value / open_t1[ticker]
-        for ticker, value in target_values.items()
-        if ticker in open_t1 and open_t1[ticker] > 0
-    }
-    cash = (1.0 - config.stock_ratio) * nav_open_post
+    quantities = target_quantities
+    cash_open_post = nav_open_post - sum(target_values.values())
+    cash = cash_open_post * (1.0 + config.cash_return)
     open_to_close_pnl = sum(qty * (close_t1.get(ticker, 0.0) - open_t1.get(ticker, 0.0)) for ticker, qty in quantities.items())
     nav_close = cash + _safe_sum_values(quantities, close_t1)
     turnover_ratio = turnover_value / nav_open_pre if nav_open_pre > EPS else 0.0
@@ -491,6 +552,7 @@ def rebalance_and_mark_to_market_next_day(
         "turnover_value": turnover_value,
         "turnover_ratio": turnover_ratio,
         "daily_return": daily_return,
+        "cash_return": config.cash_return,
     }
     return next_state, details
 
@@ -584,10 +646,39 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
+def build_trade_history_rows(
+    strategy: str,
+    decision_date: pd.Timestamp,
+    execution_date: pd.Timestamp,
+    decision_df: pd.DataFrame,
+    execution_df: pd.DataFrame,
+    old_quantities: Mapping[str, float],
+    new_quantities: Mapping[str, float],
+    target_sleeve_weights: Mapping[str, float],
+    result: Mapping[str, float],
+    stock_ratio: float,
+) -> List[Mapping[str, object]]:
+    if _a0_build_trade_rows is None:
+        return []
+    return _a0_build_trade_rows(
+        strategy=strategy,
+        decision_date=pd.Timestamp(decision_date).date().isoformat(),
+        execution_date=pd.Timestamp(execution_date).date().isoformat(),
+        decision_df=decision_df,
+        execution_df=execution_df,
+        old_qty=old_quantities,
+        new_qty=new_quantities,
+        target_sleeve_weights=target_sleeve_weights,
+        result=result,
+        stock_ratio=stock_ratio,
+    )
+
+
 def _save_common_outputs(
     out_dir: Path,
     daily_rows: Sequence[Mapping[str, object]],
     weight_rows: Sequence[Mapping[str, object]],
+    trade_rows: Sequence[Mapping[str, object]],
     decision_rows: Sequence[Mapping[str, object]],
     expert_prob_rows: Sequence[Mapping[str, object]],
     expert_return_rows: Sequence[Mapping[str, object]],
@@ -599,12 +690,14 @@ def _save_common_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     daily = pd.DataFrame(daily_rows)
     weights = pd.DataFrame(weight_rows)
+    trades = pd.DataFrame(trade_rows)
     expert_probs = pd.DataFrame(expert_prob_rows)
     expert_returns = pd.DataFrame(expert_return_rows)
     log_wealth = pd.DataFrame(log_wealth_rows)
 
     daily.to_csv(out_dir / "daily_results.csv", index=False)
     weights.to_csv(out_dir / "weights.csv", index=False)
+    trades.to_csv(out_dir / "trade_history.csv", index=False)
     expert_probs.to_csv(out_dir / "expert_probs.csv", index=False)
     expert_returns.to_csv(out_dir / "expert_gross_returns.csv", index=False)
     log_wealth.to_csv(out_dir / "a6_log_wealth.csv", index=False)
@@ -631,6 +724,14 @@ def run_A6_core_backtest(
     config: Optional[BacktestConfig] = None,
 ) -> None:
     config = config or BacktestConfig()
+    regime_path = default_regime_path()
+    regime = load_regime_table(regime_path)
+    kofr_path = default_kofr_path()
+    kofr = load_kofr_table(kofr_path)
+    kofr_path = default_kofr_path()
+    kofr = load_kofr_table(kofr_path)
+    kofr_path = default_kofr_path()
+    kofr = load_kofr_table(kofr_path)
     panel = _panel_with_a5_labels(panel)
     dates = sorted(panel["date"].drop_duplicates())
     next_dates = _next_date_map(dates)
@@ -642,6 +743,7 @@ def run_A6_core_backtest(
 
     daily_rows: List[Mapping[str, object]] = []
     weight_rows: List[Mapping[str, object]] = []
+    trade_rows: List[Mapping[str, object]] = []
     decision_rows: List[Mapping[str, object]] = []
     expert_prob_rows: List[Mapping[str, object]] = []
     expert_return_rows: List[Mapping[str, object]] = []
@@ -659,9 +761,27 @@ def run_A6_core_backtest(
         expert_weights = make_core_expert_weights(day_df, history, top_k)
         expert_probs = compute_expert_mixture_probs(dons_state)
         blended_weights = blend_expert_weights(expert_weights, expert_probs, valid["ticker"].astype(str))
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(execution_date), config.stock_ratio)
+        execution_cash_return = kofr_cash_return_for_date(kofr, pd.Timestamp(execution_date))
+        execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         previous_nav = a6_state.nav
+        old_quantities = dict(a6_state.quantities)
         a6_state, details = rebalance_and_mark_to_market_next_day(
-            a6_state, blended_weights, day_df, next_day_df, config
+            a6_state, blended_weights, day_df, next_day_df, execution_config
+        )
+        trade_rows.extend(
+            build_trade_history_rows(
+                strategy=f"A6_core_k{top_k}",
+                decision_date=decision_date,
+                execution_date=execution_date,
+                decision_df=day_df,
+                execution_df=next_day_df,
+                old_quantities=old_quantities,
+                new_quantities=a6_state.quantities,
+                target_sleeve_weights=blended_weights,
+                result=details,
+                stock_ratio=execution_stock_ratio,
+            )
         )
         index_gross = _index_gross_return(day_df, next_day_df)
         a6_gross = max(EPS, a6_state.nav / previous_nav)
@@ -671,7 +791,7 @@ def run_A6_core_backtest(
         expert_gross_returns: Dict[str, float] = {}
         for expert_name in CORE_EXPERTS:
             next_shadow_state, gross_return = rebalance_and_mark_to_market_expert_shadow_state(
-                shadow_states[expert_name], expert_weights[expert_name], day_df, next_day_df, config
+                shadow_states[expert_name], expert_weights[expert_name], day_df, next_day_df, execution_config
             )
             shadow_states[expert_name] = next_shadow_state
             expert_gross_returns[expert_name] = gross_return
@@ -705,7 +825,8 @@ def run_A6_core_backtest(
                 "turnover_value": details["turnover_value"],
                 "turnover_ratio": details["turnover_ratio"],
                 "daily_return": details["daily_return"],
-                "stock_ratio": config.stock_ratio,
+                "stock_ratio": execution_stock_ratio,
+                "cash_return": execution_cash_return,
                 "fallback_used": False,
                 "effective_num_positions": _effective_num_positions(blended_weights),
                 "index_gross_return_close_to_close": index_gross,
@@ -720,7 +841,7 @@ def run_A6_core_backtest(
                     "ticker": ticker,
                     "ETF_id": row.get("ETF_id", ticker),
                     "sleeve_weight": blended_weights.get(ticker, 0.0),
-                    "portfolio_weight": config.stock_ratio * blended_weights.get(ticker, 0.0),
+                    "portfolio_weight": execution_stock_ratio * blended_weights.get(ticker, 0.0),
                 }
             )
         decision_rows.append(
@@ -760,11 +881,17 @@ def run_A6_core_backtest(
         "expert_probability_entropy": _entropy(final_probs),
         "dons_eta": eta,
         "dons_gamma": gamma,
+        "stock_ratio": config.stock_ratio,
+        "stock_ratio_mode": "regime" if regime is not None else "constant",
+        "regime_path": _display_path(regime_path),
+        "cash_return_mode": "kofr_1_trading_day" if kofr is not None else "zero",
+        "kofr_path": _display_path(kofr_path),
     }
     _save_common_outputs(
         Path(out_dir),
         daily_rows,
         weight_rows,
+        trade_rows,
         decision_rows,
         expert_prob_rows,
         expert_return_rows,
@@ -834,6 +961,8 @@ def run_A6_full_backtest(
     config: Optional[BacktestConfig] = None,
 ) -> None:
     config = config or BacktestConfig()
+    regime_path = default_regime_path()
+    regime = load_regime_table(regime_path)
     panel = _panel_with_a5_labels(panel)
     dates = sorted(panel["date"].drop_duplicates())
     next_dates = _next_date_map(dates)
@@ -848,6 +977,7 @@ def run_A6_full_backtest(
 
     daily_rows: List[Mapping[str, object]] = []
     weight_rows: List[Mapping[str, object]] = []
+    trade_rows: List[Mapping[str, object]] = []
     decision_rows: List[Mapping[str, object]] = []
     expert_prob_rows: List[Mapping[str, object]] = []
     expert_return_rows: List[Mapping[str, object]] = []
@@ -875,9 +1005,27 @@ def run_A6_full_backtest(
 
         expert_probs = compute_expert_mixture_probs(dons_state)
         blended_weights = blend_expert_weights(expert_weights, expert_probs, valid_tickers)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(execution_date), config.stock_ratio)
+        execution_cash_return = kofr_cash_return_for_date(kofr, pd.Timestamp(execution_date))
+        execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         previous_nav = a6_state.nav
+        old_quantities = dict(a6_state.quantities)
         a6_state, details = rebalance_and_mark_to_market_next_day(
-            a6_state, blended_weights, day_df, next_day_df, config
+            a6_state, blended_weights, day_df, next_day_df, execution_config
+        )
+        trade_rows.extend(
+            build_trade_history_rows(
+                strategy=f"A6_full_k{top_k}",
+                decision_date=decision_date,
+                execution_date=execution_date,
+                decision_df=day_df,
+                execution_df=next_day_df,
+                old_quantities=old_quantities,
+                new_quantities=a6_state.quantities,
+                target_sleeve_weights=blended_weights,
+                result=details,
+                stock_ratio=execution_stock_ratio,
+            )
         )
         index_gross = _index_gross_return(day_df, next_day_df)
         a6_gross = max(EPS, a6_state.nav / previous_nav)
@@ -893,7 +1041,7 @@ def run_A6_full_backtest(
         # persistent shadow accounting used by A6-core for these three experts.
         for expert_name in ("MARKET_ONLY", "FLOW_ONLY", "ROTATION_ONLY"):
             next_shadow_state, gross = rebalance_and_mark_to_market_expert_shadow_state(
-                rank_shadow_states[expert_name], expert_weights[expert_name], day_df, next_day_df, config
+                rank_shadow_states[expert_name], expert_weights[expert_name], day_df, next_day_df, execution_config
             )
             rank_shadow_states[expert_name] = next_shadow_state
             expert_gross_returns[expert_name] = gross
@@ -929,7 +1077,8 @@ def run_A6_full_backtest(
                 "turnover_value": details["turnover_value"],
                 "turnover_ratio": details["turnover_ratio"],
                 "daily_return": details["daily_return"],
-                "stock_ratio": config.stock_ratio,
+                "stock_ratio": execution_stock_ratio,
+                "cash_return": execution_cash_return,
                 "fallback_used": False,
                 "effective_num_positions": _effective_num_positions(blended_weights),
                 "index_gross_return_close_to_close": index_gross,
@@ -944,7 +1093,7 @@ def run_A6_full_backtest(
                     "ticker": ticker,
                     "ETF_id": row.get("ETF_id", ticker),
                     "sleeve_weight": blended_weights.get(ticker, 0.0),
-                    "portfolio_weight": config.stock_ratio * blended_weights.get(ticker, 0.0),
+                    "portfolio_weight": execution_stock_ratio * blended_weights.get(ticker, 0.0),
                 }
             )
         decision_rows.append(
@@ -983,11 +1132,17 @@ def run_A6_full_backtest(
         "expert_probability_entropy": _entropy(final_probs),
         "dons_eta": eta,
         "dons_gamma": gamma,
+        "stock_ratio": config.stock_ratio,
+        "stock_ratio_mode": "regime" if regime is not None else "constant",
+        "regime_path": _display_path(regime_path),
+        "cash_return_mode": "kofr_1_trading_day" if kofr is not None else "zero",
+        "kofr_path": _display_path(kofr_path),
     }
     _save_common_outputs(
         Path(out_dir),
         daily_rows,
         weight_rows,
+        trade_rows,
         decision_rows,
         expert_prob_rows,
         expert_return_rows,
@@ -998,16 +1153,237 @@ def run_A6_full_backtest(
     )
 
 
+SELECTED_EXTERNAL_EXPERT_DIRS = {
+    "A0": "A0",
+    "A1": "A1_k{top_k}",
+    "A2a": "A2a_k{top_k}",
+    "A2b": "A2b_k{top_k}",
+    "A3": "A3_k{top_k}",
+    "A4": "A4_k{top_k}",
+    "A5": "A5_k{top_k}",
+}
+
+
+def load_selected_external_experts(out_root: str | Path, top_k: int) -> Dict[str, Tuple[pd.DataFrame, pd.DataFrame]]:
+    root = Path(out_root)
+    loaded: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
+    for expert_name, dirname_template in SELECTED_EXTERNAL_EXPERT_DIRS.items():
+        expert_dir = root / dirname_template.format(top_k=top_k)
+        weights_path = expert_dir / "weights.csv"
+        returns_path = expert_dir / "daily_results.csv"
+        if not weights_path.exists() or not returns_path.exists():
+            raise FileNotFoundError(f"Missing A6-selected expert inputs for {expert_name}: {expert_dir}")
+        loaded[expert_name] = (_load_external_weights(weights_path), _load_external_returns(returns_path))
+    return loaded
+
+
+def run_A6_selected_external_backtest(
+    panel: pd.DataFrame,
+    top_k: int,
+    out_dir: str | Path,
+    expert_out_root: str | Path,
+    eta: float = 1.0,
+    gamma: float = 0.99,
+    config: Optional[BacktestConfig] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> None:
+    config = config or BacktestConfig()
+    regime_path = default_regime_path()
+    regime = load_regime_table(regime_path)
+    dates = sorted(panel["date"].drop_duplicates())
+    next_dates = _next_date_map(dates)
+    external = load_selected_external_experts(expert_out_root, top_k)
+    expert_names = list(SELECTED_EXTERNAL_EXPERT_DIRS)
+    dons_state = initialize_dons_state(expert_names, eta=eta, gamma=gamma)
+    a6_state = initialize_portfolio_state(config.initial_nav)
+    log_wealth_value = 0.0
+    index_relative_log_wealth = 0.0
+
+    daily_rows: List[Mapping[str, object]] = []
+    weight_rows: List[Mapping[str, object]] = []
+    trade_rows: List[Mapping[str, object]] = []
+    decision_rows: List[Mapping[str, object]] = []
+    expert_prob_rows: List[Mapping[str, object]] = []
+    expert_return_rows: List[Mapping[str, object]] = []
+    log_wealth_rows: List[Mapping[str, object]] = []
+    strategy = "A6_DONS_A0_A1_A2A_A2B_A3_A4_A5"
+    start_ts = pd.Timestamp(start_date) if start_date else None
+    end_ts = pd.Timestamp(end_date) if end_date else None
+
+    for decision_date in dates[:-1]:
+        decision_ts = pd.Timestamp(decision_date)
+        if start_ts is not None and decision_ts < start_ts:
+            continue
+        if end_ts is not None and decision_ts > end_ts:
+            continue
+        execution_date = next_dates[decision_date]
+        day_df = panel.loc[panel["date"] == decision_date].copy()
+        next_day_df = panel.loc[panel["date"] == execution_date].copy()
+        valid = get_valid_universe(day_df)
+        if valid.empty:
+            continue
+        valid_tickers = list(valid["ticker"].astype(str))
+        expert_weights = {
+            expert_name: _external_weights_for_date(weights_df, decision_date, valid_tickers)
+            for expert_name, (weights_df, _) in external.items()
+        }
+        expert_probs = compute_expert_mixture_probs(dons_state)
+        blended_weights = blend_expert_weights(expert_weights, expert_probs, valid_tickers)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(execution_date), config.stock_ratio)
+        execution_cash_return = kofr_cash_return_for_date(kofr, pd.Timestamp(execution_date))
+        execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
+        previous_nav = a6_state.nav
+        old_quantities = dict(a6_state.quantities)
+        a6_state, details = rebalance_and_mark_to_market_next_day(
+            a6_state, blended_weights, day_df, next_day_df, execution_config
+        )
+        trade_rows.extend(
+            build_trade_history_rows(
+                strategy=strategy,
+                decision_date=decision_date,
+                execution_date=execution_date,
+                decision_df=day_df,
+                execution_df=next_day_df,
+                old_quantities=old_quantities,
+                new_quantities=a6_state.quantities,
+                target_sleeve_weights=blended_weights,
+                result=details,
+                stock_ratio=execution_stock_ratio,
+            )
+        )
+        index_gross = _index_gross_return(day_df, next_day_df)
+        a6_gross = max(EPS, a6_state.nav / previous_nav)
+        log_wealth_value += math.log(a6_gross)
+        index_relative_log_wealth += math.log(a6_gross / max(EPS, index_gross))
+        expert_gross_returns = {
+            expert_name: _external_return_for_date(returns_df, decision_date)
+            for expert_name, (_, returns_df) in external.items()
+        }
+        expert_prob_rows.append(
+            {
+                "decision_date": decision_date,
+                "execution_date": execution_date,
+                **expert_probs,
+                "expert_probability_entropy": _entropy(expert_probs),
+            }
+        )
+        expert_return_rows.append(
+            {
+                "decision_date": decision_date,
+                "execution_date": execution_date,
+                **expert_gross_returns,
+            }
+        )
+        daily_rows.append(
+            {
+                "decision_date": decision_date,
+                "execution_date": execution_date,
+                "strategy": strategy,
+                "nav_close": details["nav_close"],
+                "nav_open_pre": details["nav_open_pre"],
+                "nav_open_post": details["nav_open_post"],
+                "overnight_pnl": details["overnight_pnl"],
+                "open_to_close_pnl": details["open_to_close_pnl"],
+                "commission": details["commission"],
+                "turnover_value": details["turnover_value"],
+                "turnover_ratio": details["turnover_ratio"],
+                "daily_return": details["daily_return"],
+                "stock_ratio": execution_stock_ratio,
+                "cash_return": execution_cash_return,
+                "fallback_used": False,
+                "effective_num_positions": _effective_num_positions(blended_weights),
+                "index_gross_return_close_to_close": index_gross,
+            }
+        )
+        for _, row in valid.iterrows():
+            ticker = str(row["ticker"])
+            sleeve_weight = blended_weights.get(ticker, 0.0)
+            weight_rows.append(
+                {
+                    "decision_date": decision_date,
+                    "execution_date": execution_date,
+                    "ticker": ticker,
+                    "ETF_id": row.get("ETF_id", ticker),
+                    "sleeve_weight": sleeve_weight,
+                    "portfolio_weight": execution_stock_ratio * sleeve_weight,
+                }
+            )
+        decision_rows.append(
+            {
+                "decision_date": decision_date,
+                "execution_date": execution_date,
+                "strategy": strategy,
+                "expert_probs": expert_probs,
+                "expert_net_gross_returns": expert_gross_returns,
+                "dons_eta": eta,
+                "dons_gamma": gamma,
+                "stock_ratio": execution_stock_ratio,
+                "cash_return": execution_cash_return,
+            }
+        )
+        log_wealth_rows.append(
+            {
+                "decision_date": decision_date,
+                "execution_date": execution_date,
+                "a6_log_wealth": log_wealth_value,
+                "a6_index_relative_log_wealth": index_relative_log_wealth,
+                "index_gross_return_close_to_close": index_gross,
+            }
+        )
+        dons_state = update_dons_state(dons_state, expert_gross_returns)
+
+    final_probs = compute_expert_mixture_probs(dons_state)
+    prob_df = pd.DataFrame(expert_prob_rows)
+    avg_probs = (
+        {name: float(prob_df[name].mean()) for name in expert_names if name in prob_df.columns}
+        if not prob_df.empty
+        else final_probs
+    )
+    summary_extra = {
+        "experts": expert_names,
+        "average_expert_probability": avg_probs,
+        "final_expert_mixture_weight": final_probs,
+        "best_expert_by_average_mixture_weight": max(avg_probs, key=avg_probs.get) if avg_probs else None,
+        "expert_probability_entropy": _entropy(final_probs),
+        "dons_eta": eta,
+        "dons_gamma": gamma,
+        "stock_ratio": config.stock_ratio,
+        "stock_ratio_mode": "regime" if regime is not None else "constant",
+        "regime_path": _display_path(regime_path),
+        "cash_return_mode": "kofr_1_trading_day" if kofr is not None else "zero",
+        "kofr_path": _display_path(kofr_path),
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    _save_common_outputs(
+        Path(out_dir),
+        daily_rows,
+        weight_rows,
+        trade_rows,
+        decision_rows,
+        expert_prob_rows,
+        expert_return_rows,
+        log_wealth_rows,
+        summary_extra,
+        strategy,
+        top_k,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run A6 D-ONS OBS expert allocator")
     parser.add_argument("--rank-panel", default="rank_panel.csv")
     parser.add_argument("--out-root", default="out")
-    parser.add_argument("--mode", choices=("core", "full", "both"), default="core")
+    parser.add_argument("--mode", choices=("core", "full", "selected", "both"), default="core")
+    parser.add_argument("--expert-out-root", default=None)
     parser.add_argument("--top-k", type=int, nargs="*", default=list(TOP_K_VALUES))
     parser.add_argument("--eta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--initial-nav", type=float, default=INITIAL_NAV)
     parser.add_argument("--commission-rate", type=float, default=COMMISSION_RATE)
+    parser.add_argument("--start-date", default=None)
+    parser.add_argument("--end-date", default=None)
     return parser.parse_args()
 
 
@@ -1017,6 +1393,7 @@ def main() -> None:
     validate_backtest_panel(panel)
     config = BacktestConfig(initial_nav=args.initial_nav, commission_rate=args.commission_rate)
     out_root = Path(args.out_root)
+    expert_out_root = Path(args.expert_out_root) if args.expert_out_root else out_root
     for top_k in args.top_k:
         if args.mode in ("core", "both"):
             run_A6_core_backtest(
@@ -1032,10 +1409,22 @@ def main() -> None:
                 panel,
                 top_k=top_k,
                 out_dir=out_root / f"A6_full_k{top_k}",
-                expert_out_root=out_root,
+                expert_out_root=expert_out_root,
                 eta=args.eta,
                 gamma=args.gamma,
                 config=config,
+            )
+        if args.mode == "selected":
+            run_A6_selected_external_backtest(
+                panel,
+                top_k=top_k,
+                out_dir=out_root,
+                expert_out_root=expert_out_root,
+                eta=args.eta,
+                gamma=args.gamma,
+                config=config,
+                start_date=args.start_date,
+                end_date=args.end_date,
             )
 
 

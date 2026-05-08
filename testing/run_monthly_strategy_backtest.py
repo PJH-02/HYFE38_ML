@@ -38,10 +38,22 @@ def log(message: str) -> None:
     print(f"{stamp} {message}", flush=True)
 
 
-def month_ranges(rank_panel: Path, start_month: str | None = None, end_month: str | None = None) -> list[tuple[str, str, str, int]]:
+def month_ranges(
+    rank_panel: Path,
+    start_month: str | None = None,
+    end_month: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[tuple[str, str, str, int]]:
     panel = pd.read_csv(rank_panel, usecols=["date"], parse_dates=["date"])
     dates = sorted(panel["date"].dropna().drop_duplicates())
     decision_dates = dates[:-1]
+    start_ts = pd.Timestamp(start_date) if start_date else None
+    end_ts = pd.Timestamp(end_date) if end_date else None
+    if start_ts is not None:
+        decision_dates = [date for date in decision_dates if pd.Timestamp(date) >= start_ts]
+    if end_ts is not None:
+        decision_dates = [date for date in decision_dates if pd.Timestamp(date) <= end_ts]
     if not decision_dates:
         return []
     by_month: dict[str, list[pd.Timestamp]] = {}
@@ -171,12 +183,20 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--start-month", default=None, help="Optional inclusive YYYY-MM month start.")
     parser.add_argument("--end-month", default=None, help="Optional inclusive YYYY-MM month end.")
+    parser.add_argument("--start-date", default=None, help="Optional inclusive decision-date start.")
+    parser.add_argument("--end-date", default=None, help="Optional inclusive decision-date end.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     rank_panel = args.rank_panel.resolve()
     out_root = args.out_root.resolve()
-    ranges = month_ranges(rank_panel, start_month=args.start_month, end_month=args.end_month)
+    ranges = month_ranges(
+        rank_panel,
+        start_month=args.start_month,
+        end_month=args.end_month,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     if not ranges:
         raise SystemExit(f"No monthly decision ranges found in {rank_panel}")
     log(
@@ -192,6 +212,8 @@ def main() -> None:
             "event": "monthly_run_start",
             "start_month": args.start_month,
             "end_month": args.end_month,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
             "months": len(ranges),
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },

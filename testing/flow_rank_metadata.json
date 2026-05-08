@@ -1,6 +1,11 @@
 {
-  "score_formula": "mean(sign(shrunk_predictive_corr) * actor_flow_z) over actors where abs(shrunk_predictive_corr) >= corr_threshold",
+  "score_formula": "mean(actor_direction * actor_flow_z) over selected actors",
   "corr_threshold": 0.1,
+  "spread_threshold": null,
+  "spread_quantile": null,
+  "actor_selection_mode": "dynamic",
+  "team_static_includes_weak_directional_classes": false,
+  "team_static_flow_directions": null,
   "no_selected_actor_rows": 395,
   "no_selected_actor_report": "C:\\Users\\박제형\\Desktop\\ML6\\testing\\flow_rank_no_selected_actor_report.csv"
 }
