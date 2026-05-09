@@ -2,13 +2,16 @@
   "strategy": "A2b_LLM_SEMANTIC",
   "top_k": 10,
   "complete": false,
-  "completed_decisions": 241,
+  "completed_decisions": 359,
   "state": {
-    "nav": 951498647.3527038,
-    "cash": 664519448.3527038,
+    "nav": 1035162281.4298041,
+    "cash": 598292890.4298041,
     "quantities": {
-      "476800": 69537.0
+      "117460": 7987.0,
+      "139260": 5344.0,
+      "139270": 11718.0,
+      "315270": 1890.0
     }
   },
-  "updated_at": "2026-05-09T13:06:24Z"
+  "updated_at": "2026-05-09T16:26:00Z"
 }
