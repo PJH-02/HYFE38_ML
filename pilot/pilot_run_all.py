@@ -541,7 +541,7 @@ def run_strategy(
             raise ValueError("Need at least one decision date before pilot start date for initial weights.")
         initial_decision = prior_dates[-1]
         day_df = panel.loc[panel["date"] == initial_decision]
-        initial_regime = regime_for_date(regime, start_ts.date().isoformat())
+        initial_regime = regime_for_date(regime, initial_decision.date().isoformat())
         weights, log = strategy_weights(
             strategy,
             day_df,
@@ -595,7 +595,7 @@ def run_strategy(
             next_dates = [candidate for candidate in dates if candidate > d]
             if next_dates:
                 next_execution_date = next_dates[0].date().isoformat()
-                next_regime = regime_for_date(regime, next_execution_date)
+                next_regime = regime_for_date(regime, date_text)
                 next_weights, next_log = strategy_weights(
                     strategy,
                     day_df,
@@ -617,7 +617,7 @@ def run_strategy(
     decision_df = panel.loc[panel["date"] == as_of_ts]
     if decision_df.empty:
         raise ValueError(f"No panel rows for as_of_date={as_of_date}")
-    next_regime = regime_for_date(regime, next_open_date)
+    next_regime = regime_for_date(regime, as_of_date)
     weights, decision_log = strategy_weights(
         strategy,
         decision_df,

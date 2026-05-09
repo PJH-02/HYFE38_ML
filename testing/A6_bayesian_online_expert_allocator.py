@@ -761,7 +761,7 @@ def run_A6_core_backtest(
         expert_weights = make_core_expert_weights(day_df, history, top_k)
         expert_probs = compute_expert_mixture_probs(dons_state)
         blended_weights = blend_expert_weights(expert_weights, expert_probs, valid["ticker"].astype(str))
-        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(execution_date), config.stock_ratio)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(decision_date), config.stock_ratio)
         execution_cash_return = kofr_cash_return_for_date(kofr, pd.Timestamp(execution_date))
         execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         previous_nav = a6_state.nav
@@ -1005,7 +1005,7 @@ def run_A6_full_backtest(
 
         expert_probs = compute_expert_mixture_probs(dons_state)
         blended_weights = blend_expert_weights(expert_weights, expert_probs, valid_tickers)
-        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(execution_date), config.stock_ratio)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(decision_date), config.stock_ratio)
         execution_cash_return = kofr_cash_return_for_date(kofr, pd.Timestamp(execution_date))
         execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         previous_nav = a6_state.nav
@@ -1191,6 +1191,8 @@ def run_A6_selected_external_backtest(
     config = config or BacktestConfig()
     regime_path = default_regime_path()
     regime = load_regime_table(regime_path)
+    kofr_path = default_kofr_path()
+    kofr = load_kofr_table(kofr_path)
     dates = sorted(panel["date"].drop_duplicates())
     next_dates = _next_date_map(dates)
     external = load_selected_external_experts(expert_out_root, top_k)
@@ -1230,7 +1232,7 @@ def run_A6_selected_external_backtest(
         }
         expert_probs = compute_expert_mixture_probs(dons_state)
         blended_weights = blend_expert_weights(expert_weights, expert_probs, valid_tickers)
-        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(execution_date), config.stock_ratio)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, pd.Timestamp(decision_date), config.stock_ratio)
         execution_cash_return = kofr_cash_return_for_date(kofr, pd.Timestamp(execution_date))
         execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         previous_nav = a6_state.nav

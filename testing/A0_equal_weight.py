@@ -155,9 +155,8 @@ def apply_regime_market_score(day_df: pd.DataFrame, regime_info: Mapping[str, An
 def apply_regime_market_score_by_next_execution(panel: pd.DataFrame, regime: pd.DataFrame | None) -> pd.DataFrame:
     dates = list(pd.Series(panel["date"].drop_duplicates()).sort_values())
     pieces = []
-    for idx, decision_date in enumerate(dates):
-        execution_date = dates[idx + 1] if idx + 1 < len(dates) else decision_date
-        regime_info = regime_info_for_date(regime, pd.Timestamp(execution_date))
+    for decision_date in dates:
+        regime_info = regime_info_for_date(regime, pd.Timestamp(decision_date))
         pieces.append(apply_regime_market_score(panel.loc[panel["date"] == decision_date], regime_info))
     return pd.concat(pieces, ignore_index=True) if pieces else panel.copy()
 
@@ -501,14 +500,14 @@ def run_backtest(
         if end_ts is not None and decision_ts > end_ts:
             continue
         execution_date = dates[idx + 1]
-        regime_info = regime_info_for_date(regime, execution_date)
+        regime_info = regime_info_for_date(regime, decision_date)
         day_df = apply_regime_market_score(panel.loc[panel["date"] == decision_date], regime_info)
         if get_valid_universe(day_df).empty:
             continue
         price_t1 = _next_day_prices(panel, dates, idx)
         target_weights, fallback_used = weight_generator(day_df)
         target_weights = target_weights[target_weights > 0]
-        execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, config.stock_ratio)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, decision_date, config.stock_ratio)
         execution_cash_return = kofr_cash_return_for_date(kofr, execution_date)
         execution_config = replace(config, stock_ratio=execution_stock_ratio, cash_return=execution_cash_return)
         old_qty = state["qty"].copy()

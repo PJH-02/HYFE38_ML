@@ -955,7 +955,7 @@ def run_llm_backtest(
         if decision_date_text in completed_dates:
             continue
         execution_date = dates[step + 1]
-        regime_info = regime_info_for_date(regime, pd.Timestamp(execution_date))
+        regime_info = regime_info_for_date(regime, pd.Timestamp(decision_date))
         day_df = apply_regime_market_score(panel[panel["date"] == decision_date], regime_info)
         next_df = panel[panel["date"] == execution_date].copy()
         if get_valid_universe(day_df).empty:
@@ -978,7 +978,7 @@ def run_llm_backtest(
                 + json.dumps(failure_log, ensure_ascii=False, sort_keys=True, default=str)
             )
         fallback_count += int(decision.fallback_used)
-        execution_stock_ratio = regime_stock_ratio_for_date(regime, execution_date, STOCK_RATIO)
+        execution_stock_ratio = regime_stock_ratio_for_date(regime, decision_date, STOCK_RATIO)
         execution_cash_return = kofr_cash_return_for_date(kofr, execution_date)
         old_quantities = {str(k): float(v) for k, v in state.get("quantities", {}).items()}
         state, result = rebalance_and_mark_to_market_next_day(

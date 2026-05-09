@@ -1,4 +1,4 @@
-name: ETF Rank Backtest 2024 KOFR Resume
+name: ETF Rank Backtest 2024 KOFR Decision-Regime Resume
 
 on:
   workflow_dispatch:
@@ -10,22 +10,24 @@ on:
       - "KOFR_20260508.xlsx"
       - "testing/*.py"
       - "testing/regime_weights.csv"
-      - "testing/backtest_state/chunk_state_2024_*.json"
+      - "testing/backtest_state/chunk_state_2024_decision_*.json"
+      - "testing/backtest_state/non_llm_state_2024_decision.json"
 
 permissions:
   contents: write
   actions: write
 
 concurrency:
-  group: etf-rank-backtest-2024-kofr-state
+  group: etf-rank-backtest-2024-kofr-decision-regime
   cancel-in-progress: false
 
 env:
   REGIME_CSV_PATH: regime_weights.csv
   KOFR_XLSX_PATH: ../KOFR_20260508.xlsx
-  OUT_ROOT: backtest_state/out_2024_kofr_a0_a6_k10
-  PRIMARY_STATE_PATH: backtest_state/chunk_state_2024_a3_a4.json
-  SECONDARY_STATE_PATH: backtest_state/chunk_state_2024_a2a_a2b.json
+  OUT_ROOT: backtest_state/out_2024_kofr_decision_regime_a0_a6_k10
+  A2_STATE_PATH: backtest_state/chunk_state_2024_decision_a2a_a2b.json
+  A3_STATE_PATH: backtest_state/chunk_state_2024_decision_a3_a4.json
+  NON_LLM_STATE_PATH: backtest_state/non_llm_state_2024_decision.json
   START_DECISION_DATE: "2024-01-05"
   END_DECISION_DATE: "2026-05-07"
   TOP_K_VALUES: "10"
@@ -73,32 +75,36 @@ jobs:
 
           python -u determine_next_backtest_chunk.py \
             --rank-panel rank_panel.csv \
-            --state-path "$PRIMARY_STATE_PATH" \
+            --state-path "$A2_STATE_PATH" \
             --months-per-run "$MONTHS_PER_RUN" \
             --start-date "$START_DECISION_DATE" \
-            --end-date "$END_DECISION_DATE" > primary.env
+            --end-date "$END_DECISION_DATE" > a2.env
 
-          primary_should="$(grep '^should_run=' primary.env | cut -d= -f2-)"
-          if [ "$primary_should" = "1" ]; then
-            phase="primary"
-            cp primary.env selected.env
-            state_path="$PRIMARY_STATE_PATH"
+          a2_should="$(grep '^should_run=' a2.env | cut -d= -f2-)"
+          if [ "$a2_should" = "1" ]; then
+            phase="a2"
+            cp a2.env selected.env
+            state_path="$A2_STATE_PATH"
           else
             python -u determine_next_backtest_chunk.py \
               --rank-panel rank_panel.csv \
-              --state-path "$SECONDARY_STATE_PATH" \
+              --state-path "$A3_STATE_PATH" \
               --months-per-run "$MONTHS_PER_RUN" \
               --start-date "$START_DECISION_DATE" \
-              --end-date "$END_DECISION_DATE" > secondary.env
-            secondary_should="$(grep '^should_run=' secondary.env | cut -d= -f2-)"
-            if [ "$secondary_should" = "1" ]; then
-              phase="secondary"
-              cp secondary.env selected.env
-              state_path="$SECONDARY_STATE_PATH"
+              --end-date "$END_DECISION_DATE" > a3.env
+            a3_should="$(grep '^should_run=' a3.env | cut -d= -f2-)"
+            if [ "$a3_should" = "1" ]; then
+              phase="a3"
+              cp a3.env selected.env
+              state_path="$A3_STATE_PATH"
+            elif [ ! -f "$NON_LLM_STATE_PATH" ]; then
+              phase="nonllm"
+              cp a3.env selected.env
+              state_path="$NON_LLM_STATE_PATH"
             else
               phase="final"
-              cp secondary.env selected.env
-              state_path="$SECONDARY_STATE_PATH"
+              cp a3.env selected.env
+              state_path="$NON_LLM_STATE_PATH"
             fi
           fi
 
@@ -130,11 +136,284 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  a2-llm-backtest-chunk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: prepare-ranks
+    if: needs.prepare-ranks.outputs.phase == 'a2'
+    name: A2 LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        llm_strategy: [A2a, A2b]
+    env: &llm_env
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_CONFIG_PATH: .no_local_llm_config.json
+      LLM_PROVIDER: nvidia
+      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
+      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
+      LLM_MODEL: z-ai/glm4.7
+      LLM_TIMEOUT_SECONDS: "180"
+      LLM_MAX_TOKENS: "2048"
+      LLM_MAX_RETRIES: "12"
+      LLM_RETRY_SLEEP_SECONDS: "30"
+      LLM_SUCCESS_SLEEP_SECONDS: "2"
+      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
+      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+      LLM_FAIL_ON_FALLBACK: "0"
+      LLM_VALIDATION_RETRIES: "8"
+      LLM_PROGRESS_INTERVAL: "10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy openpyxl
+
+      - name: Validate NVIDIA secret
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "NVIDIA_API_KEY repository secret is required."
+            exit 1
+          fi
+
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
+
+      - name: Run six-month A2 LLM backtest chunk
+        working-directory: testing
+        run: |
+          python -u run_monthly_strategy_backtest.py \
+            --strategy "${{ matrix.llm_strategy }}" \
+            --rank-panel rank_panel.csv \
+            --out-root "$OUT_ROOT" \
+            --top-k "$TOP_K_VALUES" \
+            --start-month "${{ needs.prepare-ranks.outputs.start_month }}" \
+            --end-month "${{ needs.prepare-ranks.outputs.end_month }}" \
+            --start-date "$START_DECISION_DATE" \
+            --end-date "$END_DECISION_DATE"
+
+      - name: Upload A2 LLM state for commit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-rank-llm-state-${{ matrix.llm_strategy }}-${{ github.run_id }}
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/${{ matrix.llm_strategy }}_k10/
+          if-no-files-found: error
+          retention-days: 14
+
+  commit-a2-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [prepare-ranks, a2-llm-backtest-chunk]
+    if: needs.prepare-ranks.outputs.phase == 'a2'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download A2a state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A2a-${{ github.run_id }}
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A2a_k10
+
+      - name: Download A2b state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A2b-${{ github.run_id }}
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A2b_k10
+
+      - name: Update A2 chunk state
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          state_path = Path("testing") / os.environ["A2_STATE_PATH"]
+          state_path.parent.mkdir(parents=True, exist_ok=True)
+          state = {
+              "last_completed_start_month": os.environ["START_MONTH"],
+              "last_completed_end_month": os.environ["END_MONTH"],
+              "months_per_run": int(os.environ["MONTHS_PER_RUN"]),
+              "start_decision_date": os.environ["START_DECISION_DATE"],
+              "end_decision_date": os.environ["END_DECISION_DATE"],
+              "phase": "a2a_a2b",
+              "out_root": "testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+        env:
+          START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
+          END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
+
+      - name: Commit A2 state
+        id: commit_state
+        run: &commit_and_push |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add testing/backtest_state
+          if git diff --cached --quiet; then
+            echo "No backtest state changes to commit."
+            echo "committed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "$COMMIT_MESSAGE"
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+          echo "committed=1" >> "$GITHUB_OUTPUT"
+        env:
+          COMMIT_MESSAGE: "ci: save decision-regime A2 state through ${{ needs.prepare-ranks.outputs.end_month }}"
+
+      - name: Trigger next phase or chunk
+        if: steps.commit_state.outputs.committed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: &dispatch_next |
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/etf-rank-backtest-a0-a5.yml/dispatches" \
+            -d "{\"ref\":\"${REF_NAME}\"}"
+
+  a3-llm-backtest-chunk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: prepare-ranks
+    if: needs.prepare-ranks.outputs.phase == 'a3'
+    name: A3/A4 LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        llm_strategy: [A3, A4]
+    env: *llm_env
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy openpyxl
+
+      - name: Validate NVIDIA secret
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "NVIDIA_API_KEY repository secret is required."
+            exit 1
+          fi
+
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-${{ github.run_id }}
+          path: testing
+
+      - name: Run six-month A3/A4 LLM backtest chunk
+        working-directory: testing
+        run: |
+          python -u run_monthly_strategy_backtest.py \
+            --strategy "${{ matrix.llm_strategy }}" \
+            --rank-panel rank_panel.csv \
+            --out-root "$OUT_ROOT" \
+            --top-k "$TOP_K_VALUES" \
+            --start-month "${{ needs.prepare-ranks.outputs.start_month }}" \
+            --end-month "${{ needs.prepare-ranks.outputs.end_month }}" \
+            --start-date "$START_DECISION_DATE" \
+            --end-date "$END_DECISION_DATE"
+
+      - name: Upload A3/A4 LLM state for commit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-rank-llm-state-${{ matrix.llm_strategy }}-${{ github.run_id }}
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/${{ matrix.llm_strategy }}_k10/
+          if-no-files-found: error
+          retention-days: 14
+
+  commit-a3-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [prepare-ranks, a3-llm-backtest-chunk]
+    if: needs.prepare-ranks.outputs.phase == 'a3'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download A3 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A3-${{ github.run_id }}
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A3_k10
+
+      - name: Download A4 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A4-${{ github.run_id }}
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A4_k10
+
+      - name: Update A3/A4 chunk state
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          state_path = Path("testing") / os.environ["A3_STATE_PATH"]
+          state_path.parent.mkdir(parents=True, exist_ok=True)
+          state = {
+              "last_completed_start_month": os.environ["START_MONTH"],
+              "last_completed_end_month": os.environ["END_MONTH"],
+              "months_per_run": int(os.environ["MONTHS_PER_RUN"]),
+              "start_decision_date": os.environ["START_DECISION_DATE"],
+              "end_decision_date": os.environ["END_DECISION_DATE"],
+              "phase": "a3_a4",
+              "out_root": "testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+        env:
+          START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
+          END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
+
+      - name: Commit A3/A4 state
+        id: commit_state
+        run: *commit_and_push
+        env:
+          COMMIT_MESSAGE: "ci: save decision-regime A3/A4 state through ${{ needs.prepare-ranks.outputs.end_month }}"
+
+      - name: Trigger next phase or chunk
+        if: steps.commit_state.outputs.committed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: *dispatch_next
+
   non-llm-backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: prepare-ranks
-    if: needs.prepare-ranks.outputs.phase != ''
+    if: needs.prepare-ranks.outputs.phase == 'nonllm'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -153,7 +432,7 @@ jobs:
           name: rebuilt-ranks-${{ github.run_id }}
           path: testing
 
-      - name: Run A0 A1 A5 from 2024-01-05 decision
+      - name: Run A0 A1 A5 after LLM completion
         working-directory: testing
         run: |
           mkdir -p "$OUT_ROOT"
@@ -175,177 +454,22 @@ jobs:
             --start-date "$START_DECISION_DATE" \
             --end-date "$END_DECISION_DATE"
 
-      - name: Upload non-LLM state
+      - name: Upload non-LLM state for commit
         uses: actions/upload-artifact@v4
         with:
           name: etf-rank-non-llm-state-${{ github.run_id }}
           path: |
-            testing/backtest_state/out_2024_kofr_a0_a6_k10/A0/
-            testing/backtest_state/out_2024_kofr_a0_a6_k10/A1_k10/
-            testing/backtest_state/out_2024_kofr_a0_a6_k10/A5_k10/
+            testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A0/
+            testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A1_k10/
+            testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10/A5_k10/
           if-no-files-found: error
           retention-days: 14
 
-  primary-llm-backtest-chunk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    needs: [prepare-ranks, non-llm-backtest]
-    if: needs.prepare-ranks.outputs.phase == 'primary'
-    name: Primary LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        llm_strategy: [A3, A4]
-    env:
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_CONFIG_PATH: .no_local_llm_config.json
-      LLM_PROVIDER: nvidia
-      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
-      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
-      LLM_MODEL: z-ai/glm4.7
-      LLM_TIMEOUT_SECONDS: "180"
-      LLM_MAX_TOKENS: "2048"
-      LLM_MAX_RETRIES: "12"
-      LLM_RETRY_SLEEP_SECONDS: "30"
-      LLM_SUCCESS_SLEEP_SECONDS: "2"
-      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
-      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
-      LLM_FAIL_ON_FALLBACK: "1"
-      LLM_VALIDATION_RETRIES: "6"
-      LLM_PROGRESS_INTERVAL: "10"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip pandas numpy openpyxl
-
-      - name: Validate NVIDIA secret
-        run: |
-          if [ -z "$NVIDIA_API_KEY" ]; then
-            echo "NVIDIA_API_KEY repository secret is required."
-            exit 1
-          fi
-
-      - name: Download rebuilt ranks
-        uses: actions/download-artifact@v4
-        with:
-          name: rebuilt-ranks-${{ github.run_id }}
-          path: testing
-
-      - name: Restore existing committed state
-        run: mkdir -p testing/backtest_state/out_2024_kofr_a0_a6_k10
-
-      - name: Run six-month primary LLM backtest chunk
-        working-directory: testing
-        run: |
-          python -u run_monthly_strategy_backtest.py \
-            --strategy "${{ matrix.llm_strategy }}" \
-            --rank-panel rank_panel.csv \
-            --out-root "$OUT_ROOT" \
-            --top-k "$TOP_K_VALUES" \
-            --start-month "${{ needs.prepare-ranks.outputs.start_month }}" \
-            --end-month "${{ needs.prepare-ranks.outputs.end_month }}" \
-            --start-date "$START_DECISION_DATE" \
-            --end-date "$END_DECISION_DATE"
-
-      - name: Upload primary LLM state for commit
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: etf-rank-llm-state-${{ matrix.llm_strategy }}-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10/${{ matrix.llm_strategy }}_k10/
-          if-no-files-found: error
-          retention-days: 14
-
-  secondary-llm-backtest-chunk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    needs: [prepare-ranks, non-llm-backtest]
-    if: needs.prepare-ranks.outputs.phase == 'secondary'
-    name: Secondary LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        llm_strategy: [A2a, A2b]
-    env:
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_CONFIG_PATH: .no_local_llm_config.json
-      LLM_PROVIDER: nvidia
-      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
-      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
-      LLM_MODEL: z-ai/glm4.7
-      LLM_TIMEOUT_SECONDS: "180"
-      LLM_MAX_TOKENS: "2048"
-      LLM_MAX_RETRIES: "12"
-      LLM_RETRY_SLEEP_SECONDS: "30"
-      LLM_SUCCESS_SLEEP_SECONDS: "2"
-      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
-      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
-      LLM_FAIL_ON_FALLBACK: "1"
-      LLM_VALIDATION_RETRIES: "6"
-      LLM_PROGRESS_INTERVAL: "10"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip pandas numpy openpyxl
-
-      - name: Validate NVIDIA secret
-        run: |
-          if [ -z "$NVIDIA_API_KEY" ]; then
-            echo "NVIDIA_API_KEY repository secret is required."
-            exit 1
-          fi
-
-      - name: Download rebuilt ranks
-        uses: actions/download-artifact@v4
-        with:
-          name: rebuilt-ranks-${{ github.run_id }}
-          path: testing
-
-      - name: Run six-month secondary LLM backtest chunk
-        working-directory: testing
-        run: |
-          python -u run_monthly_strategy_backtest.py \
-            --strategy "${{ matrix.llm_strategy }}" \
-            --rank-panel rank_panel.csv \
-            --out-root "$OUT_ROOT" \
-            --top-k "$TOP_K_VALUES" \
-            --start-month "${{ needs.prepare-ranks.outputs.start_month }}" \
-            --end-month "${{ needs.prepare-ranks.outputs.end_month }}" \
-            --start-date "$START_DECISION_DATE" \
-            --end-date "$END_DECISION_DATE"
-
-      - name: Upload secondary LLM state for commit
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: etf-rank-llm-state-${{ matrix.llm_strategy }}-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10/${{ matrix.llm_strategy }}_k10/
-          if-no-files-found: error
-          retention-days: 14
-
-  commit-primary-state:
+  commit-non-llm-state:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [prepare-ranks, non-llm-backtest, primary-llm-backtest-chunk]
-    if: needs.prepare-ranks.outputs.phase == 'primary'
+    needs: [prepare-ranks, non-llm-backtest]
+    if: needs.prepare-ranks.outputs.phase == 'nonllm'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -356,159 +480,44 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: etf-rank-non-llm-state-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10
+          path: testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10
 
-      - name: Download A3 state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-state-A3-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10/A3_k10
-
-      - name: Download A4 state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-state-A4-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10/A4_k10
-
-      - name: Update primary chunk state
+      - name: Update non-LLM state
         run: |
           python - <<'PY'
           import json, os, time
           from pathlib import Path
-          state_path = Path("testing") / os.environ["PRIMARY_STATE_PATH"]
+          state_path = Path("testing") / os.environ["NON_LLM_STATE_PATH"]
           state_path.parent.mkdir(parents=True, exist_ok=True)
           state = {
-              "last_completed_start_month": os.environ["START_MONTH"],
-              "last_completed_end_month": os.environ["END_MONTH"],
-              "months_per_run": int(os.environ["MONTHS_PER_RUN"]),
+              "complete": True,
               "start_decision_date": os.environ["START_DECISION_DATE"],
               "end_decision_date": os.environ["END_DECISION_DATE"],
-              "phase": "primary_a3_a4",
-              "out_root": "testing/backtest_state/out_2024_kofr_a0_a6_k10",
+              "phase": "non_llm_a0_a1_a5",
+              "out_root": "testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10",
               "run_id": os.environ["GITHUB_RUN_ID"],
               "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
           }
           state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
-        env:
-          START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
-          END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
 
-      - name: Commit primary state
+      - name: Commit non-LLM state
         id: commit_state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add testing/backtest_state
-          if git diff --cached --quiet; then
-            echo "No backtest state changes to commit."
-            echo "committed=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git commit -m "ci: save 2024 kofr A3/A4 state through ${{ needs.prepare-ranks.outputs.end_month }}"
-          git pull --rebase --autostash origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-          echo "committed=1" >> "$GITHUB_OUTPUT"
+        run: *commit_and_push
+        env:
+          COMMIT_MESSAGE: "ci: save decision-regime A0/A1/A5 state"
 
-      - name: Trigger next phase or chunk
+      - name: Trigger final A6
         if: steps.commit_state.outputs.committed == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
-        run: |
-          curl -fsSL -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/etf-rank-backtest-a0-a5.yml/dispatches" \
-            -d "{\"ref\":\"${REF_NAME}\"}"
-
-  commit-secondary-state:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [prepare-ranks, non-llm-backtest, secondary-llm-backtest-chunk]
-    if: needs.prepare-ranks.outputs.phase == 'secondary'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-
-      - name: Download non-LLM state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-non-llm-state-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10
-
-      - name: Download A2a state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-state-A2a-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10/A2a_k10
-
-      - name: Download A2b state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-llm-state-A2b-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10/A2b_k10
-
-      - name: Update secondary chunk state
-        run: |
-          python - <<'PY'
-          import json, os, time
-          from pathlib import Path
-          state_path = Path("testing") / os.environ["SECONDARY_STATE_PATH"]
-          state_path.parent.mkdir(parents=True, exist_ok=True)
-          state = {
-              "last_completed_start_month": os.environ["START_MONTH"],
-              "last_completed_end_month": os.environ["END_MONTH"],
-              "months_per_run": int(os.environ["MONTHS_PER_RUN"]),
-              "start_decision_date": os.environ["START_DECISION_DATE"],
-              "end_decision_date": os.environ["END_DECISION_DATE"],
-              "phase": "secondary_a2a_a2b",
-              "out_root": "testing/backtest_state/out_2024_kofr_a0_a6_k10",
-              "run_id": os.environ["GITHUB_RUN_ID"],
-              "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-          }
-          state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          PY
-        env:
-          START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
-          END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
-
-      - name: Commit secondary state
-        id: commit_state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add testing/backtest_state
-          if git diff --cached --quiet; then
-            echo "No backtest state changes to commit."
-            echo "committed=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git commit -m "ci: save 2024 kofr A2a/A2b state through ${{ needs.prepare-ranks.outputs.end_month }}"
-          git pull --rebase --autostash origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-          echo "committed=1" >> "$GITHUB_OUTPUT"
-
-      - name: Trigger next phase or chunk
-        if: steps.commit_state.outputs.committed == '1'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          curl -fsSL -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/etf-rank-backtest-a0-a5.yml/dispatches" \
-            -d "{\"ref\":\"${REF_NAME}\"}"
+        run: *dispatch_next
 
   final-a6-report:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: [prepare-ranks, non-llm-backtest]
+    needs: prepare-ranks
     if: needs.prepare-ranks.outputs.phase == 'final'
     steps:
       - name: Checkout
@@ -530,12 +539,6 @@ jobs:
           name: rebuilt-ranks-${{ github.run_id }}
           path: testing
 
-      - name: Download non-LLM state
-        uses: actions/download-artifact@v4
-        with:
-          name: etf-rank-non-llm-state-${{ github.run_id }}
-          path: testing/backtest_state/out_2024_kofr_a0_a6_k10
-
       - name: Run A6 and final report
         working-directory: testing
         run: |
@@ -550,7 +553,7 @@ jobs:
           python -u build_final_backtest_report.py \
             --out-root "$OUT_ROOT" \
             --rank-panel rank_panel.csv \
-            --report-dir backtest_state/final_report_2024_kofr_a0_a6 \
+            --report-dir backtest_state/final_report_2024_kofr_decision_regime_a0_a6 \
             --models A0,A1,A2a,A2b,A3,A4,A5,A6
 
       - name: Commit final A6 report
@@ -562,6 +565,6 @@ jobs:
             echo "No final backtest changes to commit."
             exit 0
           fi
-          git commit -m "ci: save final 2024 kofr A0-A6 report"
+          git commit -m "ci: save final decision-regime A0-A6 report"
           git pull --rebase --autostash origin "${{ github.ref_name }}"
           git push origin "HEAD:${{ github.ref_name }}"
