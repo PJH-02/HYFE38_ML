@@ -1,11 +1,11 @@
 {
   "end_decision_date": "2026-05-07",
-  "last_completed_end_month": "2023-11",
-  "last_completed_start_month": "2023-06",
+  "last_completed_end_month": "2024-05",
+  "last_completed_start_month": "2023-12",
   "months_per_run": 6,
   "out_root": "testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10",
   "phase": "a3_a4_2023_kofr_decision_regime",
-  "run_id": "25622994369",
+  "run_id": "25624541632",
   "start_decision_date": "2023-06-02",
-  "updated_at": "2026-05-10T08:53:50Z"
+  "updated_at": "2026-05-10T10:49:32Z"
 }
