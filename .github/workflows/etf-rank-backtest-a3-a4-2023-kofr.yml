@@ -1,0 +1,249 @@
+name: ETF Rank Backtest A3/A4 2023 KOFR Decision-Regime Resume
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/etf-rank-backtest-a3-a4-2023-kofr.yml"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: etf-rank-backtest-a3-a4-2023-kofr-decision-regime
+  cancel-in-progress: false
+
+env:
+  REGIME_CSV_PATH: regime_weights.csv
+  KOFR_XLSX_PATH: ../KOFR_20260508.xlsx
+  OUT_ROOT: backtest_state/out_2023_kofr_decision_regime_a3_a4_k10
+  A3_A4_STATE_PATH: backtest_state/chunk_state_2023_decision_a3_a4.json
+  START_DECISION_DATE: "2023-06-02"
+  END_DECISION_DATE: "2026-05-07"
+  TOP_K_VALUES: "10"
+  MONTHS_PER_RUN: "6"
+
+jobs:
+  prepare-ranks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      should_run: ${{ steps.plan.outputs.should_run }}
+      start_month: ${{ steps.plan.outputs.start_month }}
+      end_month: ${{ steps.plan.outputs.end_month }}
+      first_month: ${{ steps.plan.outputs.first_month }}
+      last_month: ${{ steps.plan.outputs.last_month }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy openpyxl
+
+      - name: Rebuild rank panel
+        working-directory: testing
+        run: |
+          python -u 01_make_market_corr_rank.py
+          python -u 02_make_flow_price_rank.py
+          python -u 03_make_rotation_rank.py
+          python -u 04_merge_rank_panel.py
+
+      - name: Determine next A3/A4 chunk
+        id: plan
+        working-directory: testing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backtest_state
+          python -u determine_next_backtest_chunk.py \
+            --rank-panel rank_panel.csv \
+            --state-path "$A3_A4_STATE_PATH" \
+            --months-per-run "$MONTHS_PER_RUN" \
+            --start-date "$START_DECISION_DATE" \
+            --end-date "$END_DECISION_DATE" > selected.env
+          cat selected.env
+          cat selected.env >> "$GITHUB_OUTPUT"
+
+      - name: Show plan
+        run: |
+          echo "should_run=${{ steps.plan.outputs.should_run }}"
+          echo "start_month=${{ steps.plan.outputs.start_month }}"
+          echo "end_month=${{ steps.plan.outputs.end_month }}"
+          echo "available=${{ steps.plan.outputs.first_month }}..${{ steps.plan.outputs.last_month }}"
+
+      - name: Upload rebuilt ranks
+        if: steps.plan.outputs.should_run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebuilt-ranks-a3-a4-2023-${{ github.run_id }}
+          path: |
+            testing/market_rank.csv
+            testing/flow_rank.csv
+            testing/flow_rank_metadata.json
+            testing/flow_rank_no_selected_actor_report.csv
+            testing/rotation_rank.csv
+            testing/rank_panel.csv
+            testing/regime_weights.csv
+          if-no-files-found: error
+          retention-days: 14
+
+  a3-a4-llm-backtest-chunk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: prepare-ranks
+    if: needs.prepare-ranks.outputs.should_run == '1'
+    name: A3/A4 LLM ${{ matrix.llm_strategy }} ${{ needs.prepare-ranks.outputs.start_month }}..${{ needs.prepare-ranks.outputs.end_month }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        llm_strategy: [A3, A4]
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_CONFIG_PATH: .no_local_llm_config.json
+      LLM_PROVIDER: nvidia
+      LLM_BASE_URL: https://integrate.api.nvidia.com/v1/
+      LLM_CHAT_COMPLETIONS_URL: https://integrate.api.nvidia.com/v1/chat/completions
+      LLM_MODEL: z-ai/glm4.7
+      LLM_TIMEOUT_SECONDS: "180"
+      LLM_MAX_TOKENS: "2048"
+      LLM_MAX_RETRIES: "12"
+      LLM_RETRY_SLEEP_SECONDS: "30"
+      LLM_SUCCESS_SLEEP_SECONDS: "2"
+      LLM_RESPONSE_FORMAT: '{"type":"json_object"}'
+      LLM_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+      LLM_FAIL_ON_FALLBACK: "0"
+      LLM_VALIDATION_RETRIES: "8"
+      LLM_PROGRESS_INTERVAL: "10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pandas numpy openpyxl
+
+      - name: Validate NVIDIA secret
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "NVIDIA_API_KEY repository secret is required."
+            exit 1
+          fi
+
+      - name: Download rebuilt ranks
+        uses: actions/download-artifact@v4
+        with:
+          name: rebuilt-ranks-a3-a4-2023-${{ github.run_id }}
+          path: testing
+
+      - name: Run six-month A3/A4 LLM backtest chunk
+        working-directory: testing
+        run: |
+          python -u run_monthly_strategy_backtest.py \
+            --strategy "${{ matrix.llm_strategy }}" \
+            --rank-panel rank_panel.csv \
+            --out-root "$OUT_ROOT" \
+            --top-k "$TOP_K_VALUES" \
+            --start-month "${{ needs.prepare-ranks.outputs.start_month }}" \
+            --end-month "${{ needs.prepare-ranks.outputs.end_month }}" \
+            --start-date "$START_DECISION_DATE" \
+            --end-date "$END_DECISION_DATE"
+
+      - name: Upload A3/A4 LLM state for commit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-rank-llm-state-${{ matrix.llm_strategy }}-2023-${{ github.run_id }}
+          path: testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10/${{ matrix.llm_strategy }}_k10/
+          if-no-files-found: error
+          retention-days: 14
+
+  commit-a3-a4-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [prepare-ranks, a3-a4-llm-backtest-chunk]
+    if: needs.prepare-ranks.outputs.should_run == '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download A3 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A3-2023-${{ github.run_id }}
+          path: testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10/A3_k10
+
+      - name: Download A4 state
+        uses: actions/download-artifact@v4
+        with:
+          name: etf-rank-llm-state-A4-2023-${{ github.run_id }}
+          path: testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10/A4_k10
+
+      - name: Update A3/A4 chunk state
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          state_path = Path("testing") / os.environ["A3_A4_STATE_PATH"]
+          state_path.parent.mkdir(parents=True, exist_ok=True)
+          state = {
+              "last_completed_start_month": os.environ["START_MONTH"],
+              "last_completed_end_month": os.environ["END_MONTH"],
+              "months_per_run": int(os.environ["MONTHS_PER_RUN"]),
+              "start_decision_date": os.environ["START_DECISION_DATE"],
+              "end_decision_date": os.environ["END_DECISION_DATE"],
+              "phase": "a3_a4_2023_kofr_decision_regime",
+              "out_root": "testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+        env:
+          START_MONTH: ${{ needs.prepare-ranks.outputs.start_month }}
+          END_MONTH: ${{ needs.prepare-ranks.outputs.end_month }}
+
+      - name: Commit A3/A4 state
+        id: commit_state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "testing/${A3_A4_STATE_PATH}" testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10/A3_k10 testing/backtest_state/out_2023_kofr_decision_regime_a3_a4_k10/A4_k10
+          if git diff --cached --quiet; then
+            echo "No A3/A4 state changes to commit."
+            echo "committed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "ci: save 2023 decision-regime A3/A4 state through ${{ needs.prepare-ranks.outputs.end_month }}"
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+          echo "committed=1" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger next A3/A4 chunk
+        if: steps.commit_state.outputs.committed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/etf-rank-backtest-a3-a4-2023-kofr.yml/dispatches" \
+            -d "{\"ref\":\"${REF_NAME}\"}"
+
