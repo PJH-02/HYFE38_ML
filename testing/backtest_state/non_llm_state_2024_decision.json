@@ -1,0 +1,9 @@
+{
+  "complete": true,
+  "end_decision_date": "2026-05-07",
+  "out_root": "testing/backtest_state/out_2024_kofr_decision_regime_a0_a6_k10",
+  "phase": "non_llm_a0_a1_a5",
+  "run_id": "25617748280",
+  "start_decision_date": "2024-01-05",
+  "updated_at": "2026-05-10T02:34:29Z"
+}
